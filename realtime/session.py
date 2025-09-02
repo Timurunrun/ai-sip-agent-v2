@@ -101,19 +101,15 @@ class RealtimeClient:
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "turn_detection": {
-                            "type": "server_vad",
-                            "threshold": 0.5,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": 200,
-                            "idle_timeout_ms": None,
+                            "type": "semantic_vad",
+                            "eagerness": "high",
                             "create_response": True,
                             "interrupt_response": True,
                         },
                     },
                     "output": {
-                        # G.711 µ-law (server assumes 8 kHz)
                         "format": {"type": "audio/pcmu"},
-                        "voice": "alloy",
+                        "voice": "cedar",
                         "speed": 1,
                     },
                 },
@@ -122,10 +118,10 @@ class RealtimeClient:
         if prompt_id:
             event["session"]["prompt"] = {"id": prompt_id}
         event["session"]["instructions"] = (
-            "- Respond in the caller's language if intelligible.\n"
+            "- Respond in the Russian language.\n"
             "- Use short, natural phrases; avoid repetition.\n"
-            "- If audio is unclear/noisy/partial, ask to repeat concisely.\n"
-            "- Keep answers under two sentences; speak fast but calm.\n"
+            "- If audio is unintelligible, ask to repeat concisely.\n"
+            "- Keep answers under two sentences; speak FAST, human-like, but calm.\n"
         )
         self.send(event)
         # For PCMU output, default rate remains 8000 unless server overrides it
