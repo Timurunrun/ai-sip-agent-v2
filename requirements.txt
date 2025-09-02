@@ -1,0 +1,5 @@
+websocket-client==1.8.0
+numpy==1.26.4
+soundfile==0.12.1
+tenacity==8.5.0
+python-dotenv==1.0.1
