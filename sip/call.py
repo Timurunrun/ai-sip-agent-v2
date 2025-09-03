@@ -1,8 +1,8 @@
-import base64
 import os
 import time
 import threading
 from typing import Optional
+from collections import deque
 
 import pjsua2 as pj
 
@@ -26,6 +26,11 @@ class Call(pj.Call):
         self._stop_stream = threading.Event()
         self._rt: Optional[RealtimeClient] = None
         self._playing = False
+        # Streaming playback queue (path, duration_seconds)
+        self._play_queue: deque[tuple[str, float]] = deque()
+        self._queue_lock = threading.Lock()
+        self._play_timer: Optional[threading.Timer] = None
+        self._current_path: Optional[str] = None
         try:
             ci = self.getInfo()
             cid = getattr(ci, "callIdString", None)
@@ -135,11 +140,24 @@ class Call(pj.Call):
         self.log.debug("Bot text", text=text)
 
     def _on_bot_audio(self, audio_bytes: bytes, sample_rate: int):
-        # Write µ-law WAV to temp and play it
-        from audio.g711_wav import write_mulaw_wav
-        tmp = self._recording_path.replace(".wav", f"_out_{int(time.time()*1000)}.wav")
-        write_mulaw_wav(tmp, audio_bytes, sample_rate)
-        self._play_file(tmp)
+        # Enqueue small µ-law WAV chunk for sequential playback
+        try:
+            from audio.g711_wav import write_mulaw_wav
+            # Create a small wav file for this chunk
+            ts = int(time.time() * 1000)
+            base = self._recording_path or f"/tmp/stream_{self._call_id}.wav"
+            tmp = base.replace(".wav", f"_out_{ts}.wav")
+            write_mulaw_wav(tmp, audio_bytes, sample_rate)
+            duration = max(0.01, len(audio_bytes) / float(sample_rate))
+            with self._queue_lock:
+                self._play_queue.append((tmp, duration))
+                should_start = not self._playing
+                self._playing = True
+            if should_start:
+                # Kick off playback chain
+                self._start_next_from_queue()
+        except Exception:
+            exception(self.log, "Failed to enqueue bot audio chunk")
 
     # PJSUA2 calls must run on the main thread; marshal via account's cmdq
     def _play_file(self, path: str):
@@ -147,21 +165,54 @@ class Call(pj.Call):
             try:
                 if not self._is_call_active() or not self._has_valid_port(self._audio_media):
                     return
-                if self._player:
-                    try:
-                        if self._is_call_active() and self._has_valid_port(self._player) and self._has_valid_port(self._audio_media):
-                            self._player.stopTransmit(self._audio_media)
-                    except Exception:
-                        pass
                 self._player = pj.AudioMediaPlayer()
                 self._player.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
                 if self._is_call_active() and self._has_valid_port(self._audio_media) and self._has_valid_port(self._player):
                     self._player.startTransmit(self._audio_media)
-                self._playing = True
                 self.log.info("Playback started", file=path)
             except Exception:
                 exception(self.log, "Playback failed", file=path)
         self.acc.cmdq.put(_do)
+
+    def _start_next_from_queue(self):
+        """Start playing next queued chunk and schedule the following one."""
+        with self._queue_lock:
+            if not self._play_queue:
+                # Queue emptied; mark not playing
+                self._playing = False
+                return
+            path, duration = self._play_queue.popleft()
+            self._current_path = path
+        # Start this chunk
+        self._play_file(path)
+        # Schedule next chunk after duration (+ small safety)
+        safety = 0.02  # 20ms safety to reduce overlap
+        delay = max(0.01, duration + safety)
+        self._schedule_next_timer(delay)
+
+    def _schedule_next_timer(self, delay: float):
+        try:
+            if self._play_timer:
+                try:
+                    self._play_timer.cancel()
+                except Exception:
+                    pass
+            self._play_timer = threading.Timer(delay, self._on_chunk_finished)
+            self._play_timer.daemon = True
+            self._play_timer.start()
+        except Exception:
+            exception(self.log, "Failed to schedule next chunk")
+
+    def _on_chunk_finished(self):
+        # Clean previous file and start next if any
+        prev = self._current_path
+        self._current_path = None
+        if prev:
+            try:
+                os.unlink(prev)
+            except Exception:
+                pass
+        self._start_next_from_queue()
 
     def _stop_playback(self):
         def _do():
@@ -171,6 +222,13 @@ class Call(pj.Call):
                 except Exception:
                     pass
             self._playing = False
+            # Cancel any scheduled timer
+            try:
+                if self._play_timer:
+                    self._play_timer.cancel()
+            except Exception:
+                pass
+            self._play_timer = None
             # Release immediately to avoid repeated stop attempts
             self._player = None
             self.log.info("Playback stopped")
@@ -184,5 +242,25 @@ class Call(pj.Call):
             self._recorder = None
             # Mark media as gone to avoid future attempts
             self._audio_media = None
+            # Cancel timers and clear play queue, delete pending files
+            try:
+                if self._play_timer:
+                    self._play_timer.cancel()
+            except Exception:
+                pass
+            self._play_timer = None
+            with self._queue_lock:
+                while self._play_queue:
+                    p, _ = self._play_queue.popleft()
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
+            if self._current_path:
+                try:
+                    os.unlink(self._current_path)
+                except Exception:
+                    pass
+                self._current_path = None
             self.log.debug("Media cleaned up")
         self.acc.cmdq.put(_do)
