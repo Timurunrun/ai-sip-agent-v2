@@ -79,10 +79,15 @@ class Call(pj.Call):
             # Send audio frames as they appear (TailWavReader will pick ~20ms frames)
             for chunk in self._tail.iter_chunks(stop_event=self._stop_stream):
                 self._rt.send_audio_chunk(chunk)
-            # Signal end of input
-            self._rt.flush()
+
         except Exception as e:
             print(f"[CALL] stream loop error: {e}")
+        finally:
+            try:
+                if self._rt:
+                    self._rt.close()
+            except Exception:
+                pass
 
     def _on_bot_text(self, text: str):
         print(f"[BOT] {text}")

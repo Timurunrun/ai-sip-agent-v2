@@ -7,7 +7,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# pjsua2 must be imported in main thread
 import pjsua2 as pj
 
 from sip.endpoint import create_endpoint
@@ -18,13 +17,9 @@ from sip.command_queue import CommandQueue
 async def pjsua_pump(ep: pj.Endpoint, cmdq: CommandQueue, stop_event: threading.Event):
     """Pump PJSUA2 events and execute queued commands on the main thread."""
     while not stop_event.is_set():
-        # Handle PJSIP events
-        ep.libHandleEvents(10)
-        # Execute queued main-thread commands (PJSUA2 API calls)
-        cmdq.execute_pending()
-        # Give control back to loop
-        await asyncio.sleep(0.001)
-
+        ep.libHandleEvents(10)          # Handle PJSIP events
+        cmdq.execute_pending()          # Execute queued main-thread commands (PJSUA2 API calls)
+        await asyncio.sleep(0.001)      # Give control back to loop
 
 async def main():
     load_dotenv()
@@ -48,7 +43,7 @@ async def main():
     acc_cfg.idUri = f"sip:{sip_user}@{sip_domain}"
     acc_cfg.regConfig.registrarUri = f"sip:{sip_domain}"
     if sip_proxy:
-        # pjsua2 expects a pj.StringVector, not a Python list
+        # pjsua2 expects a pj.StringVector
         sv = pj.StringVector()
         sv.push_back(sip_proxy)
         acc_cfg.sipConfig.proxies = sv
@@ -87,5 +82,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Run asyncio in main thread so PJSUA2 calls also live here
     asyncio.run(main())

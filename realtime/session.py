@@ -25,6 +25,8 @@ class RealtimeClient:
 
         self._ws: Optional[websocket.WebSocketApp] = None
         self._open_evt = threading.Event()
+        self._send_lock = threading.Lock()
+        self._ws_thread: Optional[threading.Thread] = None
         self._buffered_audio: bytearray = bytearray()
         # Default to 8 kHz since output is PCMU (G.711 µ-law)
         self._current_sr = 8000
@@ -81,13 +83,15 @@ class RealtimeClient:
 
         t = threading.Thread(target=self._ws.run_forever, kwargs=dict(ping_interval=20, ping_timeout=10), daemon=True)
         t.start()
+        self._ws_thread = t
         self._open_evt.wait(timeout=10)
         if not self._open_evt.is_set():
             raise RuntimeError("Failed to connect to gpt-realtime")
 
     def send(self, obj: dict):
         if self._ws:
-            self._ws.send(json.dumps(obj))
+            with self._send_lock:
+                self._ws.send(json.dumps(obj))
 
     def update_session(self):
         prompt_id = os.environ.get("REALTIME_PROMPT_ID")
@@ -124,14 +128,26 @@ class RealtimeClient:
             "- Keep answers under two sentences; speak FAST, human-like, but calm.\n"
         )
         self.send(event)
-        # For PCMU output, default rate remains 8000 unless server overrides it
 
     def send_audio_chunk(self, pcm16_mono_bytes: bytes):
         evt = {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm16_mono_bytes).decode("ascii")}
         self.send(evt)
 
-    def flush(self):
-        # Signal we’re done with current buffer; server VAD may also auto-create response
-        self.send({"type": "input_audio_buffer.commit"})
-        # For safety, ask to create a response if not using VAD
-        self.send({"type": "response.create"})
+    def close(self):
+        # Gracefully close the WebSocket to avoid leaking threads across calls
+        try:
+            if self._ws:
+                with self._send_lock:
+                    try:
+                        self._ws.close()
+                    except Exception:
+                        pass
+        finally:
+            # Best-effort join
+            if self._ws_thread and self._ws_thread.is_alive():
+                try:
+                    self._ws_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+            self._ws = None
+            self._ws_thread = None
