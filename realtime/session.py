@@ -157,10 +157,19 @@ class RealtimeClient:
         }
         if prompt_id:
             event["session"]["prompt"] = {"id": prompt_id}
-        event["session"]["instructions"] = (
-            "- Отвечай на русском языке.\n"
-            "- Говори человечно. с задумчивостью, запинками, в быстром темпе. Ты не диктор, а оператор колл-центра. \n"
-        )
+            
+        # Load system prompt (instructions) from external Markdown file
+        try:
+            base_dir = os.path.dirname(__file__)
+            instructions_path = os.path.join(base_dir, "system_prompt.md")
+
+            with open(instructions_path, "r", encoding="utf-8") as f:
+                instructions_text = f.read().strip()
+
+            if instructions_text:
+                event["session"]["instructions"] = instructions_text
+        except Exception as e:
+            self.log.warning("Failed to load instructions file", error=str(e))
         self.send(event)
 
     def send_audio_chunk(self, pcm16_mono_bytes: bytes):
