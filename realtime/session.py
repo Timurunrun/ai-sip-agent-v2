@@ -21,11 +21,15 @@ class RealtimeClient:
         on_error: Optional[Callable[[str], None]] = None,
         context: Optional[dict[str, str]] = None,
         on_audio_done: Optional[Callable[[], None]] = None,
+        on_speech_started: Optional[Callable[[dict], None]] = None,
+        on_assistant_stream_start: Optional[Callable[[str], None]] = None,
     ):
         self.on_audio = on_audio
         self.on_text = on_text or (lambda t: None)
         self.on_error = on_error or (lambda e: None)
         self.on_audio_done = on_audio_done or (lambda: None)
+        self.on_speech_started = on_speech_started or (lambda ev: None)
+        self.on_assistant_stream_start = on_assistant_stream_start or (lambda item_id: None)
 
         self._ws: Optional[websocket.WebSocketApp] = None
         self._open_evt = threading.Event()
@@ -33,6 +37,7 @@ class RealtimeClient:
         self._ws_thread: Optional[threading.Thread] = None
         self._buffered_audio: bytearray = bytearray()
         self._current_sr = 8000     # PCMU (G.711 µ-law)
+        self._current_assistant_item_id: Optional[str] = None
         
         self.log = get_logger("realtime")
         if context:
@@ -71,11 +76,25 @@ class RealtimeClient:
                         self._current_sr = int(sr)
                     except Exception:
                         pass
+                # Track assistant message item id if present and signal start once
+                item_id = data.get("item_id")
+                if item_id and item_id != self._current_assistant_item_id:
+                    self._current_assistant_item_id = item_id
+                    try:
+                        self.on_assistant_stream_start(item_id)
+                    except Exception:
+                        pass
             elif t in ("response.completed", "response.output_audio.done", "response.done"):
                 # Signal that current response audio finished
                 self.on_audio_done()
             elif t in ("response.output_text.delta", "response.text.delta"):
                 self.on_text(data.get("delta", ""))
+            elif t == "input_audio_buffer.speech_started":
+                # Server VAD detected speech — client should interrupt playback and truncate server-side audio
+                try:
+                    self.on_speech_started(data)
+                except Exception:
+                    pass
             elif t == "error":
                 self.on_error(data.get("error", {}).get("message", str(data)))
 
@@ -104,6 +123,11 @@ class RealtimeClient:
         if self._ws:
             with self._send_lock:
                 self._ws.send(json.dumps(obj))
+
+    # Expose current assistant item id for truncation calls
+    @property
+    def current_assistant_item_id(self) -> Optional[str]:
+        return self._current_assistant_item_id
 
     def update_session(self):
         prompt_id = os.environ.get("REALTIME_PROMPT_ID")
@@ -134,15 +158,27 @@ class RealtimeClient:
         if prompt_id:
             event["session"]["prompt"] = {"id": prompt_id}
         event["session"]["instructions"] = (
-            "- Respond in the Russian language.\n"
-            "- Use short, natural phrases; avoid repetition.\n"
-            "- If audio is unintelligible, ask to repeat concisely.\n"
-            "- Keep answers under two sentences; speak VERY FAST, human-like.\n"
+            "- Отвечай на русском языке.\n"
+            "- Говори человечно. с задумчивостью, запинками, в быстром темпе. Ты не диктор, а оператор колл-центра. \n"
         )
         self.send(event)
 
     def send_audio_chunk(self, pcm16_mono_bytes: bytes):
         evt = {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm16_mono_bytes).decode("ascii")}
+        self.send(evt)
+
+    def send_truncate(self, item_id: str, audio_end_ms: int):
+        try:
+            end_ms = int(max(0, audio_end_ms))
+        except Exception:
+            end_ms = 0
+        evt = {
+            "type": "conversation.item.truncate",
+            "item_id": item_id,
+            "content_index": 0,
+            "audio_end_ms": end_ms,
+        }
+        self.log.info("Sending truncate", item_id=item_id, ms=str(end_ms))
         self.send(evt)
 
     def close(self):

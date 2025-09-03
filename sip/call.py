@@ -105,6 +105,8 @@ class Call(pj.Call):
             on_error=lambda e: self.log.error("Realtime error", error=str(e)),
             context={"call_id": self._call_id},
             on_audio_done=self._on_bot_audio_done,
+            on_speech_started=self._on_vad_speech_started,
+            on_assistant_stream_start=self._on_assistant_stream_start,
         )
         self._stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
         self._stream_thread.start()
@@ -156,6 +158,53 @@ class Call(pj.Call):
             except Exception:
                 exception(self.log, "Bot streamer finalize failed")
 
+    def _on_vad_speech_started(self, event: dict):
+        # Server-side VAD detected user speech during playback: interrupt and truncate
+        try:
+            # If there's nothing playing/buffered yet (e.g., at call start), do nothing
+            has_audio = False
+            if self._bot_streamer:
+                try:
+                    has_audio = self._bot_streamer.has_pending_or_playing()
+                except Exception:
+                    has_audio = False
+            if not has_audio:
+                self.log.debug("VAD early; nothing to interrupt yet")
+                return
+            self.log.info("VAD speech started; interrupting playback")
+
+            played_ms = 0
+            if self._bot_streamer:
+                try:
+                    played_ms = self._bot_streamer.interrupt_and_get_progress_ms()
+                except Exception:
+                    exception(self.log, "Failed to compute/interrupt playback progress")
+            item_id = None
+            try:
+                item_id = self._rt.current_assistant_item_id if self._rt else None
+            except Exception:
+                item_id = None
+            if item_id:
+                try:
+                    self._rt.send_truncate(item_id, played_ms)
+                except Exception:
+                    exception(self.log, "Failed to send truncate", item_id=str(item_id), ms=str(played_ms))
+            else:
+                # No item id yet (very early in stream); we already stopped local playback
+                self.log.debug("No assistant item_id yet; skipped truncate")
+        except Exception:
+            exception(self.log, "VAD interruption handling failed")
+
+    def _on_assistant_stream_start(self, item_id: str):
+        # A new assistant audio stream is starting; reset per-response metrics
+        try:
+            if not self._bot_streamer:
+                self._bot_streamer = BotAudioStreamer(self)
+            self._bot_streamer.start_new_response(item_id)
+            self.log.debug("Assistant stream start", item_id=str(item_id))
+        except Exception:
+            exception(self.log, "Failed to start new response tracking", item_id=str(item_id))
+
     def _cleanup_media(self):
         def _do():
             # At call teardown, the conference bridge may already be destroyed.
@@ -193,10 +242,14 @@ class BotAudioStreamer:
         self._queued_ms = 0
         self._started = False
         self._end_of_response = False
+        self._received_ms_total = 0                 # Sum of segment durations emitted for the current response
+        self._current_seg_dur_ms = 0
+        self._current_end_ts: float = 0.0           # Internal timing helper for overlap scheduling
+        self._current_seg_start_ts: float = 0.0
+        self._response_item_id: Optional[str] = None
         
         self._player: Optional[pj.AudioMediaPlayer] = None      # Active player (currently transmitting)
         self._preloaded: Optional[pj.AudioMediaPlayer] = None   # Preloaded player prepared for seamless start
-        self._current_end_ts: float = 0.0                       # Internal timing helper for overlap scheduling
         self._lock = threading.Lock()
         self._counter = 0
 
@@ -264,6 +317,7 @@ class BotAudioStreamer:
             write_mulaw_wav(path, ulaw_chunk, self.sample_rate)
             self._queue.append((path, duration_ms))
             self._queued_ms += duration_ms
+            self._received_ms_total += duration_ms
         except Exception:
             exception(self.log, "Failed to write segment", file=path)
 
@@ -301,6 +355,8 @@ class BotAudioStreamer:
                 with self._lock:
                     self._player = p
                     self._current_end_ts = time.monotonic() + max(0.0, float(dur) / 1000.0)     # Compute expected end timestamp for overlap scheduling
+                    self._current_seg_dur_ms = int(dur)
+                    self._current_seg_start_ts = time.monotonic()
                 
                 # Try to preload the next segment (if any) to remove file open latency
                 self.log.info("Segment playback", file=path, ms=str(dur))
@@ -397,6 +453,8 @@ class BotAudioStreamer:
                                 self._queued_ms = max(0, self._queued_ms - next_dur)
                                 # Update expected end based on the new segment
                                 self._current_end_ts = time.monotonic() + max(0.0, float(next_dur) / 1000.0)
+                                self._current_seg_dur_ms = int(next_dur)
+                                self._current_seg_start_ts = time.monotonic()
                         # After starting, immediately try to preload the subsequent one
                         self._try_preload_next()
                         # And schedule overlap again for the now-active segment
@@ -418,3 +476,83 @@ class BotAudioStreamer:
         t = threading.Timer(delay, _tick)
         t.daemon = True
         t.start()
+
+    # Playback progress and interruption helpers
+    def _current_remaining_ms_locked(self) -> int:
+        # Estimate remaining ms in the currently active player
+        if self._player:
+            try:
+                rem = int(max(0.0, (self._current_end_ts - time.monotonic()) * 1000.0))
+                return rem
+            except Exception:
+                return 0
+        return 0
+
+    def _compute_progress_ms_locked(self) -> int:
+        # Approximate content progress: received - (queued + remaining_current)
+        remaining = self._current_remaining_ms_locked()
+        played = int(max(0, self._received_ms_total - (self._queued_ms + remaining)))
+        return played
+
+    def get_played_ms(self) -> int:
+        with self._lock:
+            return self._compute_progress_ms_locked()
+
+    def interrupt_and_get_progress_ms(self) -> int:
+        with self._lock:
+            played = self._compute_progress_ms_locked()
+
+            # Stop active player on main thread
+            p = self._player
+            pre = self._preloaded
+            self._player = None
+            self._preloaded = None
+
+            def _stop_active():
+                try:
+                    if p and self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
+                        try:
+                            p.stopTransmit(self.call._audio_media)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        if p:
+                            p.delete()
+                    except Exception:
+                        pass
+
+            def _delete_preloaded():
+                try:
+                    if pre:
+                        pre.delete()
+                except Exception:
+                    pass
+
+            self.cmdq.put(_stop_active)
+            if pre:
+                self.cmdq.put(_delete_preloaded)
+
+            # Clear pending content
+            self._queue.clear()
+            self._queued_ms = 0
+            self._buf.clear()
+            self._started = False
+            self._end_of_response = False
+
+            return played
+
+    def start_new_response(self, item_id: str):
+        with self._lock:
+            # Reset per-response accounting; assume previous response is done or has been truncated
+            self._response_item_id = item_id
+            self._received_ms_total = 0
+            self._queued_ms = 0
+            self._queue.clear()
+            self._buf.clear()
+            self._started = False
+            self._end_of_response = False
+
+    def has_pending_or_playing(self) -> bool:
+        with self._lock:
+            return bool(self._player or self._preloaded or self._queue or self._buf or self._received_ms_total)
