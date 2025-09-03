@@ -3,3 +3,4 @@ numpy==1.26.4
 soundfile==0.12.1
 tenacity==8.5.0
 python-dotenv==1.0.1
+rich==13.7.1

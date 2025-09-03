@@ -5,6 +5,7 @@ import signal
 import threading
 import gc
 from pathlib import Path
+import logging
 
 from dotenv import load_dotenv
 
@@ -13,16 +14,26 @@ import pjsua2 as pj
 from sip.endpoint import create_endpoint
 from sip.account import Account
 from sip.command_queue import CommandQueue
+from utils.logging import setup_logging, get_logger, exception
 
 
 async def pjsua_pump(ep: pj.Endpoint, cmdq: CommandQueue, stop_event: threading.Event):
     """Pump PJSUA2 events and execute queued commands on the main thread."""
+    log = get_logger(__name__)
     while not stop_event.is_set():
-        ep.libHandleEvents(10)          # Handle PJSIP events
-        cmdq.execute_pending()          # Execute queued main-thread commands (PJSUA2 API calls)
+        try:
+            ep.libHandleEvents(10)          # Handle PJSIP events
+        except Exception:
+            exception(log, "libHandleEvents failed")
+        try:
+            cmdq.execute_pending()          # Execute queued main-thread commands (PJSUA2 API calls)
+        except Exception:
+            exception(log, "Command queue execution failed")
         await asyncio.sleep(0.001)      # Give control back to loop
 
 async def main():
+    setup_logging()
+    log = get_logger("boot")
     load_dotenv()
 
     sip_domain = os.getenv("SIP_DOMAIN")
@@ -31,7 +42,8 @@ async def main():
     sip_proxy = os.getenv("SIP_PROXY", "")
 
     if not (sip_domain and sip_user and sip_password):
-        raise SystemExit("SIP creds are missing. Set SIP_DOMAIN, SIP_USER, SIP_PASSWD")
+        log.error("Missing SIP creds. Set SIP_DOMAIN, SIP_USER, SIP_PASSWD")
+        raise SystemExit(1)
 
     ep = create_endpoint()
     adm = ep.audDevManager()
@@ -55,14 +67,14 @@ async def main():
     acc.create(acc_cfg)
 
     # Wait for reg in background (account signals semaphore internally)
-    print("[BOOT] Waiting for SIP registration…")
+    log.info("Waiting for SIP registration…")
 
     # Graceful shutdown support
     stop_event = threading.Event()
     loop = asyncio.get_running_loop()
 
     def _handle_sig():
-        print("\n[BOOT] Signal received. Shutting down…")
+        log.info("Signal received. Shutting down…")
         stop_event.set()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -126,7 +138,7 @@ async def main():
                 except Exception:
                     pass
                 gc.collect()
-                print("[BOOT] Stopped.")
+                log.info("Stopped.")
 
 
 if __name__ == "__main__":

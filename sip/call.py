@@ -8,6 +8,7 @@ import pjsua2 as pj
 
 from audio.tail_wav import TailWavReader
 from realtime.session import RealtimeClient
+from utils.logging import get_logger, bind, exception
 
 
 class Call(pj.Call):
@@ -25,6 +26,13 @@ class Call(pj.Call):
         self._stop_stream = threading.Event()
         self._rt: Optional[RealtimeClient] = None
         self._playing = False
+        try:
+            ci = self.getInfo()
+            cid = getattr(ci, "callIdString", None)
+        except Exception:
+            cid = None
+        self._call_id = str(cid or id(self))
+        self.log = bind(get_logger("sip.call"), call_id=self._call_id)
         # Cached helper to avoid pjsua_conf_disconnect asserts on invalid ports
         # When media is torn down, conference slot id becomes -1; avoid stop/connect then.
 
@@ -44,7 +52,7 @@ class Call(pj.Call):
     # Called on SIP state change
     def onCallState(self, prm):
         ci = self.getInfo()
-        print(f"[CALL] State: {ci.stateText} code={ci.lastStatusCode}")
+        self.log.info("State change", state=ci.stateText, code=str(ci.lastStatusCode))
         if ci.stateText == "DISCONNECTED":
             self._stop_stream.set()
             self._cleanup_media()
@@ -75,7 +83,7 @@ class Call(pj.Call):
                     self._recorder = pj.AudioMediaRecorder()
                     self._recorder.createRecorder(self._recording_path)
                     self._audio_media.startTransmit(self._recorder)
-                    print(f"[CALL] Recording to {self._recording_path}")
+                    self.log.info("Recording started", path=str(self._recording_path))
                     # Start tailing thread to stream to realtime
                     self._start_streaming_thread()
 
@@ -89,7 +97,8 @@ class Call(pj.Call):
         self._rt = RealtimeClient(
             on_audio=self._on_bot_audio,
             on_text=self._on_bot_text,
-            on_error=lambda e: print(f"[RT] error: {e}")
+            on_error=lambda e: self.log.error("Realtime error", error=str(e)),
+            context={"call_id": self._call_id},
         )
         self._stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
         self._stream_thread.start()
@@ -105,8 +114,8 @@ class Call(pj.Call):
             for chunk in self._tail.iter_chunks(stop_event=self._stop_stream):
                 self._rt.send_audio_chunk(chunk)
 
-        except Exception as e:
-            print(f"[CALL] stream loop error: {e}")
+        except Exception:
+            exception(self.log, "Stream loop failure")
         finally:
             try:
                 if self._rt:
@@ -123,7 +132,7 @@ class Call(pj.Call):
                 self._tail = None
 
     def _on_bot_text(self, text: str):
-        print(f"[BOT] {text}")
+        self.log.debug("Bot text", text=text)
 
     def _on_bot_audio(self, audio_bytes: bytes, sample_rate: int):
         # Write µ-law WAV to temp and play it
@@ -149,8 +158,9 @@ class Call(pj.Call):
                 if self._is_call_active() and self._has_valid_port(self._audio_media) and self._has_valid_port(self._player):
                     self._player.startTransmit(self._audio_media)
                 self._playing = True
-            except Exception as e:
-                print(f"[CALL] play error: {e}")
+                self.log.info("Playback started", file=path)
+            except Exception:
+                exception(self.log, "Playback failed", file=path)
         self.acc.cmdq.put(_do)
 
     def _stop_playback(self):
@@ -163,6 +173,7 @@ class Call(pj.Call):
             self._playing = False
             # Release immediately to avoid repeated stop attempts
             self._player = None
+            self.log.info("Playback stopped")
         self.acc.cmdq.put(_do)
 
     def _cleanup_media(self):
@@ -173,4 +184,5 @@ class Call(pj.Call):
             self._recorder = None
             # Mark media as gone to avoid future attempts
             self._audio_media = None
+            self.log.debug("Media cleaned up")
         self.acc.cmdq.put(_do)

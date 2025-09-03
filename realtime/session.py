@@ -5,6 +5,7 @@ import threading
 from typing import Callable, Optional
 
 import websocket
+from utils.logging import get_logger, bind
 
 
 class RealtimeClient:
@@ -18,6 +19,7 @@ class RealtimeClient:
         on_audio: Callable[[bytes, int], None],
         on_text: Optional[Callable[[str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        context: Optional[dict[str, str]] = None,
     ):
         self.on_audio = on_audio
         self.on_text = on_text or (lambda t: None)
@@ -30,6 +32,9 @@ class RealtimeClient:
         self._buffered_audio: bytearray = bytearray()
         # Default to 8 kHz since output is PCMU (G.711 µ-law)
         self._current_sr = 8000
+        self.log = get_logger("realtime")
+        if context:
+            self.log = bind(self.log, **context)
 
     def connect(self):
         url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
@@ -41,6 +46,7 @@ class RealtimeClient:
 
         def on_open(ws):
             self._open_evt.set()
+            self.log.info("Realtime connected")
 
         def on_message(ws, message):
             try:
@@ -72,6 +78,7 @@ class RealtimeClient:
 
         def on_error(ws, err):
             self.on_error(str(err))
+            self.log.error("Realtime WS error", error=str(err))
 
         self._ws = websocket.WebSocketApp(
             url,
@@ -86,6 +93,7 @@ class RealtimeClient:
         self._ws_thread = t
         self._open_evt.wait(timeout=10)
         if not self._open_evt.is_set():
+            self.log.error("Failed to connect to gpt-realtime")
             raise RuntimeError("Failed to connect to gpt-realtime")
 
     def send(self, obj: dict):
@@ -151,3 +159,4 @@ class RealtimeClient:
                     pass
             self._ws = None
             self._ws_thread = None
+            self.log.info("Realtime disconnected")
