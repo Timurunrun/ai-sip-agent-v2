@@ -183,8 +183,10 @@ class BotAudioStreamer:
         self.log = bind(get_logger("sip.stream"), call_id=call._call_id)
         # Settings
         self.sample_rate = 8000
-        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "500"))  # default ~200ms
-        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "100"))    # initial buffer ~150ms
+        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "300"))
+        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "70"))
+        # Start next segment slightly before current ends to avoid gaps
+        self.overlap_ms = max(0, int(os.getenv("BOT_OVERLAP_MS", "20")))
         self.segment_bytes = max(1, int(self.sample_rate * self.segment_ms / 1000))
         # State
         self._buf = bytearray()
@@ -192,7 +194,12 @@ class BotAudioStreamer:
         self._queued_ms = 0
         self._started = False
         self._end_of_response = False
+        # Active player (currently transmitting)
         self._player: Optional[pj.AudioMediaPlayer] = None
+        # Preloaded player prepared for seamless start
+        self._preloaded: Optional[pj.AudioMediaPlayer] = None
+        # Internal timing helper for overlap scheduling
+        self._current_end_ts: float = 0.0
         self._lock = threading.Lock()
         self._counter = 0
 
@@ -289,45 +296,128 @@ class BotAudioStreamer:
             if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
                 return
 
-            # Define a small subclass to hook EOF
-            streamer = self
-            call = self.call
-
-            class _Player(pj.AudioMediaPlayer):
-                def onEof2(self_inner):
-                    # Schedule advancing to next file
-                    def _advance():
-                        try:
-                            if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
-                                try:
-                                    self_inner.stopTransmit(call._audio_media)
-                                except Exception:
-                                    pass
-                        finally:
-                            try:
-                                self_inner.delete()
-                            except Exception:
-                                pass
-                            # Remove the segment file now that it's played
-                            try:
-                                os.remove(path)
-                            except Exception:
-                                pass
-                        with streamer._lock:
-                            if streamer._player is self_inner:
-                                streamer._player = None
-                            streamer._start_next_locked()
-                    streamer.cmdq.put(_advance)
-
             try:
-                p = _Player()
-                p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
+                p = self._create_player_for(path)
                 if self.call._is_call_active() and self.call._has_valid_port(self.call._audio_media):
                     p.startTransmit(self.call._audio_media)
                 with self._lock:
                     self._player = p
+                    # Compute expected end timestamp for overlap scheduling
+                    self._current_end_ts = time.monotonic() + max(0.0, float(dur) / 1000.0)
                 self.log.info("Segment playback", file=path, ms=str(dur))
+                # Try to preload the next segment (if any) to remove file open latency
+                self._try_preload_next()
+                # Schedule an early start of the preloaded segment to avoid inter-chunk gap
+                self._schedule_overlap_start(dur)
             except Exception:
                 exception(self.log, "Segment play failed", file=path)
 
         self.cmdq.put(_play_next)
+
+    def _try_preload_next(self):
+        # Prepare next player in advance without starting it
+        with self._lock:
+            if self._preloaded or not self._queue:
+                return
+            next_path, _ = self._queue[0]
+
+        def _prep():
+            if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
+                return
+            try:
+                np = self._create_player_for(next_path)
+                with self._lock:
+                    self._preloaded = np
+                self.log.debug("Preloaded next segment", file=next_path)
+            except Exception:
+                exception(self.log, "Preload failed", file=next_path)
+        self.cmdq.put(_prep)
+
+    def _create_player_for(self, path: str) -> pj.AudioMediaPlayer:
+        # Define a subclass to hook EOF for cleanup and conditional chaining
+        streamer = self
+        call = self.call
+
+        class _Player(pj.AudioMediaPlayer):
+            def __init__(self_inner):
+                super().__init__()
+                self_inner._seg_path = path
+            def onEof2(self_inner):
+                def _advance():
+                    try:
+                        if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
+                            try:
+                                self_inner.stopTransmit(call._audio_media)
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            self_inner.delete()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(getattr(self_inner, '_seg_path', path))
+                        except Exception:
+                            pass
+                    with streamer._lock:
+                        was_active = (streamer._player is self_inner)
+                        if was_active:
+                            streamer._player = None
+                        if was_active and streamer._queue:
+                            streamer._start_next_locked()
+                streamer.cmdq.put(_advance)
+
+        p = _Player()
+        p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
+        return p
+
+    def _schedule_overlap_start(self, dur_ms: int):
+        # Start preloaded ~overlap_ms before current ends; fall back to EOF chain otherwise
+        if self.overlap_ms <= 0:
+            return
+        delay = max(0.0, (dur_ms - self.overlap_ms) / 1000.0)
+
+        def _tick():
+            # If preloaded ready, start it; else retry shortly if current still active
+            with self._lock:
+                pre = self._preloaded
+                cur = self._player
+                still_time = self._current_end_ts - time.monotonic()
+            if pre and cur and still_time > -0.25:  # within reasonable window
+                def _start_preloaded():
+                    if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
+                        return
+                    try:
+                        pre.startTransmit(self.call._audio_media)
+                        with self._lock:
+                            # Transition: new becomes the active player
+                            self._player = pre
+                            self._preloaded = None
+                            # Remove the just-started path from queue since it's now playing
+                            if self._queue:
+                                # Pop the first queued item as it's now started
+                                path_started, next_dur = self._queue.pop(0)
+                                self._queued_ms = max(0, self._queued_ms - next_dur)
+                                # Update expected end based on the new segment
+                                self._current_end_ts = time.monotonic() + max(0.0, float(next_dur) / 1000.0)
+                        # After starting, immediately try to preload the subsequent one
+                        self._try_preload_next()
+                        # And schedule overlap again for the now-active segment
+                        # Use the duration of the started segment
+                        self._schedule_overlap_start(next_dur)
+                        self.log.debug("Overlap start", ms=str(self.overlap_ms))
+                    except Exception:
+                        exception(self.log, "Overlap start failed")
+                self.cmdq.put(_start_preloaded)
+            else:
+                # If not ready yet and current hasn't finished, retry shortly
+                with self._lock:
+                    retry = (self._player is not None) and (self._current_end_ts - time.monotonic() > 0.01)
+                if retry:
+                    t = threading.Timer(0.01, _tick)
+                    t.daemon = True
+                    t.start()
+
+        t = threading.Timer(delay, _tick)
+        t.daemon = True
+        t.start()
