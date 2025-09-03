@@ -43,6 +43,11 @@ class RealtimeClient:
             self._jitter_ms = int(os.getenv("BOT_AUDIO_JITTER_MS", "120"))
         except Exception:
             self._jitter_ms = 120
+        # Buffered output queue and flusher primitives
+        self._out_buffer: bytearray = bytearray()
+        self._out_cond = threading.Condition()
+        self._stop_flush = threading.Event()
+        self._flush_thread: Optional[threading.Thread] = None
         self.log = get_logger("realtime")
         if context:
             self.log = bind(self.log, **context)
@@ -72,8 +77,10 @@ class RealtimeClient:
                 if b64:
                     chunk = base64.b64decode(b64)
                     if chunk:
-                        # Emit immediately for streaming playback
-                        self.on_audio(chunk, self._current_sr)
+                        # Enqueue for jittered flushing
+                        with self._out_cond:
+                            self._out_buffer.extend(chunk)
+                            self._out_cond.notify()
                 # Sample rate may be provided as 'rate' or 'sample_rate'
                 sr = data.get("rate") or data.get("sample_rate")
                 if sr:
