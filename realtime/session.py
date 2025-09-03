@@ -11,8 +11,7 @@ from utils.logging import get_logger, bind
 class RealtimeClient:
     """Minimal WebSocket client for gpt-realtime.
 
-    Streams audio deltas (g711 µ-law) with a small jitter buffer so
-    playback can start immediately instead of waiting for response end.
+    Streams PCM16 audio chunks and collects output audio (g711_ulaw) per response.
     """
 
     def __init__(
@@ -38,16 +37,7 @@ class RealtimeClient:
         self._buffered_audio: bytearray = bytearray()
         # Default to 8 kHz since output is PCMU (G.711 µ-law)
         self._current_sr = 8000
-        # Jitter (ms) before flushing deltas downstream; adjustable via env
-        try:
-            self._jitter_ms = int(os.getenv("BOT_AUDIO_JITTER_MS", "120"))
-        except Exception:
-            self._jitter_ms = 120
-        # Buffered output queue and flusher primitives
-        self._out_buffer: bytearray = bytearray()
-        self._out_cond = threading.Condition()
-        self._stop_flush = threading.Event()
-        self._flush_thread: Optional[threading.Thread] = None
+        
         self.log = get_logger("realtime")
         if context:
             self.log = bind(self.log, **context)
@@ -77,10 +67,8 @@ class RealtimeClient:
                 if b64:
                     chunk = base64.b64decode(b64)
                     if chunk:
-                        # Enqueue for jittered flushing
-                        with self._out_cond:
-                            self._out_buffer.extend(chunk)
-                            self._out_cond.notify()
+                        # Emit immediately for streaming playback
+                        self.on_audio(chunk, self._current_sr)
                 # Sample rate may be provided as 'rate' or 'sample_rate'
                 sr = data.get("rate") or data.get("sample_rate")
                 if sr:
@@ -115,53 +103,7 @@ class RealtimeClient:
         if not self._open_evt.is_set():
             self.log.error("Failed to connect to gpt-realtime")
             raise RuntimeError("Failed to connect to gpt-realtime")
-        # Start flusher once connected
-        self._start_flush_thread()
-
-    def _start_flush_thread(self):
-        if self._flush_thread and self._flush_thread.is_alive():
-            return
-        self._stop_flush.clear()
-
-        def _flush_loop():
-            # Stream out in ~jitter_ms chunks; if data is sparse, flush anyway
-            last_flush = 0.0
-            while not self._stop_flush.is_set():
-                with self._out_cond:
-                    # Wait up to jitter_ms for new data
-                    self._out_cond.wait(timeout=max(0.001, self._jitter_ms / 1000.0))
-                    buf_len = len(self._out_buffer)
-                    # Compute target bytes for jitter window
-                    bytes_per_ms = max(1, int(self._current_sr / 1000))  # µ-law = 1 byte / sample
-                    target = max(80, bytes_per_ms * self._jitter_ms)
-                    if buf_len >= target or (buf_len > 0):
-                        # Send up to one jitter window worth; if less available, send all
-                        send_len = target if buf_len >= target else buf_len
-                        to_send = bytes(self._out_buffer[:send_len])
-                        # Remove sent portion
-                        del self._out_buffer[:send_len]
-                    else:
-                        to_send = b""
-                if to_send:
-                    try:
-                        self.on_audio(to_send, self._current_sr)
-                    except Exception as e:
-                        self.on_error(f"on_audio stream error: {e}")
-            # Final drain
-            with self._out_cond:
-                if self._out_buffer:
-                    data = bytes(self._out_buffer)
-                    self._out_buffer.clear()
-                else:
-                    data = b""
-            if data:
-                try:
-                    self.on_audio(data, self._current_sr)
-                except Exception as e:
-                    self.on_error(f"on_audio final drain error: {e}")
-
-        self._flush_thread = threading.Thread(target=_flush_loop, daemon=True)
-        self._flush_thread.start()
+        
 
     def send(self, obj: dict):
         if self._ws:
@@ -218,15 +160,7 @@ class RealtimeClient:
                     except Exception:
                         pass
         finally:
-            # Stop the flusher thread
-            try:
-                self._stop_flush.set()
-                with self._out_cond:
-                    self._out_cond.notify_all()
-                if self._flush_thread and self._flush_thread.is_alive():
-                    self._flush_thread.join(timeout=1.0)
-            except Exception:
-                pass
+            
             # Best-effort join
             if self._ws_thread and self._ws_thread.is_alive():
                 try:

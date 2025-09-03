@@ -183,8 +183,8 @@ class BotAudioStreamer:
         self.log = bind(get_logger("sip.stream"), call_id=call._call_id)
         # Settings
         self.sample_rate = 8000
-        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "300"))  # default ~200ms
-        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "200"))    # initial buffer ~150ms
+        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "500"))  # default ~200ms
+        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "100"))    # initial buffer ~150ms
         self.segment_bytes = max(1, int(self.sample_rate * self.segment_ms / 1000))
         # State
         self._buf = bytearray()
@@ -193,7 +193,6 @@ class BotAudioStreamer:
         self._started = False
         self._end_of_response = False
         self._player: Optional[pj.AudioMediaPlayer] = None
-        self._prefetch: Optional[pj.AudioMediaPlayer] = None
         self._lock = threading.Lock()
         self._counter = 0
 
@@ -241,22 +240,6 @@ class BotAudioStreamer:
                         except Exception:
                             pass
                 self.cmdq.put(_stop)
-            if self._prefetch:
-                pf = self._prefetch
-                self._prefetch = None
-                def _stop_pf():
-                    try:
-                        if self.call._has_valid_port(pf) and self.call._has_valid_port(self.call._audio_media):
-                            try:
-                                pf.stopTransmit(self.call._audio_media)
-                            except Exception:
-                                pass
-                    finally:
-                        try:
-                            pf.delete()
-                        except Exception:
-                            pass
-                self.cmdq.put(_stop_pf)
 
     # Internals
     def _flush_segments_locked(self):
@@ -291,24 +274,6 @@ class BotAudioStreamer:
                 self._start_next_locked()
 
     def _start_next_locked(self):
-        # If we already have a prefetch ready and no active player, promote it
-        if not self._player and self._prefetch:
-            def _start_prefetch(pf: pj.AudioMediaPlayer):
-                if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
-                    return
-                try:
-                    pf.startTransmit(self.call._audio_media)
-                except Exception:
-                    pass
-                with self._lock:
-                    self._player = pf
-                    self._prefetch = None
-                    # After promoting prefetch, try preparing the next one
-                    self._ensure_prefetch_locked()
-            pf = self._prefetch
-            self.cmdq.put(lambda pf=pf: _start_prefetch(pf))
-            return
-
         if not self._queue:
             if self._end_of_response:
                 # Finished current response
@@ -334,16 +299,6 @@ class BotAudioStreamer:
                     def _advance():
                         try:
                             if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
-                                # If a prefetch player exists, start it immediately to avoid gaps
-                                pf = None
-                                with streamer._lock:
-                                    pf = streamer._prefetch
-                                    streamer._prefetch = None
-                                if pf and call._has_valid_port(call._audio_media):
-                                    try:
-                                        pf.startTransmit(call._audio_media)
-                                    except Exception:
-                                        pass
                                 try:
                                     self_inner.stopTransmit(call._audio_media)
                                 except Exception:
@@ -359,16 +314,9 @@ class BotAudioStreamer:
                             except Exception:
                                 pass
                         with streamer._lock:
-                            # Promote prefetch to current player if we started it
-                            if pf is not None:
-                                streamer._player = pf
-                            else:
-                                if streamer._player is self_inner:
-                                    streamer._player = None
-                            # Prepare next prefetch if possible, or start immediate next if idle
-                            streamer._ensure_prefetch_locked()
-                            if not streamer._player:
-                                streamer._start_next_locked()
+                            if streamer._player is self_inner:
+                                streamer._player = None
+                            streamer._start_next_locked()
                     streamer.cmdq.put(_advance)
 
             try:
@@ -378,60 +326,8 @@ class BotAudioStreamer:
                     p.startTransmit(self.call._audio_media)
                 with self._lock:
                     self._player = p
-                    # Try to prefetch the next segment for gapless transition
-                    self._ensure_prefetch_locked()
                 self.log.info("Segment playback", file=path, ms=str(dur))
             except Exception:
                 exception(self.log, "Segment play failed", file=path)
 
         self.cmdq.put(_play_next)
-
-    def _ensure_prefetch_locked(self):
-        if self._prefetch or not self._queue:
-            return
-        next_path, next_dur = self._queue.pop(0)
-        self._queued_ms = max(0, self._queued_ms - next_dur)
-
-        def _prepare(path=next_path):
-            if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
-                return
-            streamer = self
-            call = self.call
-
-            class _Player(pj.AudioMediaPlayer):
-                def onEof2(self_inner):
-                    # Prefetched player finished; schedule cleanup and start subsequent
-                    def _advance():
-                        try:
-                            if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
-                                try:
-                                    self_inner.stopTransmit(call._audio_media)
-                                except Exception:
-                                    pass
-                        finally:
-                            try:
-                                self_inner.delete()
-                            except Exception:
-                                pass
-                            try:
-                                os.remove(path)
-                            except Exception:
-                                pass
-                        with streamer._lock:
-                            if streamer._player is self_inner:
-                                streamer._player = None
-                            streamer._ensure_prefetch_locked()
-                            if not streamer._player:
-                                streamer._start_next_locked()
-                    streamer.cmdq.put(_advance)
-
-            try:
-                p = _Player()
-                p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
-                with self._lock:
-                    self._prefetch = p
-                self.log.debug("Prefetched segment", file=path)
-            except Exception:
-                exception(self.log, "Prefetch failed", file=path)
-
-        self.cmdq.put(_prepare)
