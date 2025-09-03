@@ -21,20 +21,21 @@ class RealtimeClient:
         on_text: Optional[Callable[[str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         context: Optional[dict[str, str]] = None,
+        on_audio_done: Optional[Callable[[], None]] = None,
     ):
         self.on_audio = on_audio
         self.on_text = on_text or (lambda t: None)
         self.on_error = on_error or (lambda e: None)
+        self.on_audio_done = on_audio_done or (lambda: None)
 
         self._ws: Optional[websocket.WebSocketApp] = None
         self._open_evt = threading.Event()
         self._send_lock = threading.Lock()
         self._ws_thread: Optional[threading.Thread] = None
-        # Outgoing (server->us) audio jitter buffer and flusher
-        self._out_buffer: bytearray = bytearray()
-        self._out_cond = threading.Condition()
-        self._flush_thread: Optional[threading.Thread] = None
-        self._stop_flush = threading.Event()
+        # When streaming, emit audio as soon as deltas arrive. We still
+        # keep a tiny scratch buffer to hold partial state between messages
+        # if needed, but we do not wait for response.done.
+        self._buffered_audio: bytearray = bytearray()
         # Default to 8 kHz since output is PCMU (G.711 µ-law)
         self._current_sr = 8000
         # Jitter (ms) before flushing deltas downstream; adjustable via env
@@ -70,9 +71,9 @@ class RealtimeClient:
                 b64 = data.get("audio") or data.get("delta") or ""
                 if b64:
                     chunk = base64.b64decode(b64)
-                    with self._out_cond:
-                        self._out_buffer.extend(chunk)
-                        self._out_cond.notify_all()
+                    if chunk:
+                        # Emit immediately for streaming playback
+                        self.on_audio(chunk, self._current_sr)
                 # Sample rate may be provided as 'rate' or 'sample_rate'
                 sr = data.get("rate") or data.get("sample_rate")
                 if sr:
@@ -81,17 +82,8 @@ class RealtimeClient:
                     except Exception:
                         pass
             elif t in ("response.completed", "response.output_audio.done", "response.done"):
-                # Flush any remaining audio immediately
-                with self._out_cond:
-                    if self._out_buffer:
-                        data = bytes(self._out_buffer)
-                        self._out_buffer.clear()
-                        # Avoid calling user callback while holding the lock
-                if 'data' in locals() and data:
-                    try:
-                        self.on_audio(data, self._current_sr)
-                    except Exception as e:
-                        self.on_error(f"on_audio flush error: {e}")
+                # Signal that current response audio finished
+                self.on_audio_done()
             elif t in ("response.output_text.delta", "response.text.delta"):
                 self.on_text(data.get("delta", ""))
             elif t == "error":

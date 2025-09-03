@@ -26,11 +26,7 @@ class Call(pj.Call):
         self._stop_stream = threading.Event()
         self._rt: Optional[RealtimeClient] = None
         self._playing = False
-        # Streaming playback queue (path, duration_seconds)
-        self._play_queue: deque[tuple[str, float]] = deque()
-        self._queue_lock = threading.Lock()
-        self._play_timer: Optional[threading.Timer] = None
-        self._current_path: Optional[str] = None
+        self._bot_streamer: Optional["BotAudioStreamer"] = None
         try:
             ci = self.getInfo()
             cid = getattr(ci, "callIdString", None)
@@ -60,6 +56,11 @@ class Call(pj.Call):
         self.log.info("State change", state=ci.stateText, code=str(ci.lastStatusCode))
         if ci.stateText == "DISCONNECTED":
             self._stop_stream.set()
+            try:
+                if self._bot_streamer:
+                    self._bot_streamer.close()
+            except Exception:
+                exception(self.log, "Streamer close failed")
             self._cleanup_media()
             # Schedule deletion of this Call on the main thread and remove from account's tracking
             def _finalize():
@@ -104,6 +105,7 @@ class Call(pj.Call):
             on_text=self._on_bot_text,
             on_error=lambda e: self.log.error("Realtime error", error=str(e)),
             context={"call_id": self._call_id},
+            on_audio_done=self._on_bot_audio_done,
         )
         self._stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
         self._stream_thread.start()
@@ -140,24 +142,20 @@ class Call(pj.Call):
         self.log.debug("Bot text", text=text)
 
     def _on_bot_audio(self, audio_bytes: bytes, sample_rate: int):
-        # Enqueue small µ-law WAV chunk for sequential playback
+        # Stream µ-law audio bytes chunk-by-chunk via jittered segment queue
+        if not self._bot_streamer:
+            self._bot_streamer = BotAudioStreamer(self)
         try:
-            from audio.g711_wav import write_mulaw_wav
-            # Create a small wav file for this chunk
-            ts = int(time.time() * 1000)
-            base = self._recording_path or f"/tmp/stream_{self._call_id}.wav"
-            tmp = base.replace(".wav", f"_out_{ts}.wav")
-            write_mulaw_wav(tmp, audio_bytes, sample_rate)
-            duration = max(0.01, len(audio_bytes) / float(sample_rate))
-            with self._queue_lock:
-                self._play_queue.append((tmp, duration))
-                should_start = not self._playing
-                self._playing = True
-            if should_start:
-                # Kick off playback chain
-                self._start_next_from_queue()
+            self._bot_streamer.feed(audio_bytes, sample_rate or 8000)
         except Exception:
-            exception(self.log, "Failed to enqueue bot audio chunk")
+            exception(self.log, "Bot streamer feed failed")
+
+    def _on_bot_audio_done(self):
+        if self._bot_streamer:
+            try:
+                self._bot_streamer.on_done()
+            except Exception:
+                exception(self.log, "Bot streamer finalize failed")
 
     # PJSUA2 calls must run on the main thread; marshal via account's cmdq
     def _play_file(self, path: str):
@@ -264,3 +262,167 @@ class Call(pj.Call):
                 self._current_path = None
             self.log.debug("Media cleaned up")
         self.acc.cmdq.put(_do)
+
+
+class BotAudioStreamer:
+    """Per-call jittered streamer that queues µ-law WAV segments for seamless playback.
+
+    - Buffers incoming PCMU (G.711 µ-law) bytes and writes short WAV segments.
+    - Starts playback only after a small configurable jitter buffer is accumulated.
+    - Chains segments using a player with EOF callback to minimize gaps.
+    """
+
+    def __init__(self, call: Call):
+        self.call = call
+        self.cmdq = call.acc.cmdq
+        self.log = bind(get_logger("sip.stream"), call_id=call._call_id)
+        # Settings
+        self.sample_rate = 8000
+        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "200"))  # default ~200ms
+        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "150"))    # initial buffer ~150ms
+        self.segment_bytes = max(1, int(self.sample_rate * self.segment_ms / 1000))
+        # State
+        self._buf = bytearray()
+        self._queue: list[tuple[str, int]] = []  # (path, duration_ms)
+        self._queued_ms = 0
+        self._started = False
+        self._end_of_response = False
+        self._player: Optional[pj.AudioMediaPlayer] = None
+        self._lock = threading.Lock()
+        self._counter = 0
+
+    def feed(self, ulaw_bytes: bytes, sample_rate: int):
+        if not ulaw_bytes:
+            return
+        with self._lock:
+            if sample_rate and sample_rate != self.sample_rate:
+                self.sample_rate = sample_rate
+                self.segment_bytes = max(1, int(self.sample_rate * self.segment_ms / 1000))
+            self._buf.extend(ulaw_bytes)
+            self._flush_segments_locked()
+            self._maybe_start_locked()
+
+    def on_done(self):
+        with self._lock:
+            # Flush remaining as a final small segment
+            if self._buf:
+                self._emit_segment_locked(bytes(self._buf), int(len(self._buf) * 1000 / self.sample_rate))
+                self._buf.clear()
+            self._end_of_response = True
+            # If playback is ongoing and player is idle, try to start next
+            self._maybe_start_locked()
+
+    def close(self):
+        with self._lock:
+            self._queue.clear()
+            self._queued_ms = 0
+            self._buf.clear()
+            self._end_of_response = True
+            # Stop player on main thread
+            if self._player:
+                p = self._player
+                self._player = None
+                def _stop():
+                    try:
+                        if self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
+                            try:
+                                p.stopTransmit(self.call._audio_media)
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            p.delete()
+                        except Exception:
+                            pass
+                self.cmdq.put(_stop)
+
+    # Internals
+    def _flush_segments_locked(self):
+        # Emit fixed-size segments for smoother playback
+        while len(self._buf) >= self.segment_bytes:
+            chunk = self._buf[:self.segment_bytes]
+            del self._buf[:self.segment_bytes]
+            self._emit_segment_locked(bytes(chunk), self.segment_ms)
+
+    def _emit_segment_locked(self, ulaw_chunk: bytes, duration_ms: int):
+        from audio.g711_wav import write_mulaw_wav
+        # Use same directory as recording to stay on same filesystem
+        base = self.call._recording_path or f"/tmp/pjsua_recordings_v2/call_{int(time.time())}.wav"
+        path = base.replace('.wav', f"_stream_{self._counter}.wav")
+        self._counter += 1
+        try:
+            write_mulaw_wav(path, ulaw_chunk, self.sample_rate)
+            self._queue.append((path, duration_ms))
+            self._queued_ms += duration_ms
+        except Exception:
+            exception(self.log, "Failed to write segment", file=path)
+
+    def _maybe_start_locked(self):
+        # Start playback once jitter buffer is filled, or continue chaining
+        if not self._started:
+            if self._queued_ms >= self.jitter_ms and self._queue:
+                self._started = True
+                self._start_next_locked()
+        else:
+            # If already started but no active player and we have queue, start next
+            if not self._player and self._queue:
+                self._start_next_locked()
+
+    def _start_next_locked(self):
+        if not self._queue:
+            if self._end_of_response:
+                # Finished current response
+                self._started = False
+                self._end_of_response = False
+            return
+
+        path, dur = self._queue.pop(0)
+        self._queued_ms = max(0, self._queued_ms - dur)
+
+        def _play_next():
+            # Validate ports
+            if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
+                return
+
+            # Define a small subclass to hook EOF
+            streamer = self
+            call = self.call
+
+            class _Player(pj.AudioMediaPlayer):
+                def onEof2(self_inner):
+                    # Schedule advancing to next file
+                    def _advance():
+                        try:
+                            if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
+                                try:
+                                    self_inner.stopTransmit(call._audio_media)
+                                except Exception:
+                                    pass
+                        finally:
+                            try:
+                                self_inner.delete()
+                            except Exception:
+                                pass
+                            # Remove the segment file now that it's played
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+                        with streamer._lock:
+                            if streamer._player is self_inner:
+                                streamer._player = None
+                            streamer._start_next_locked()
+                    streamer.cmdq.put(_advance)
+
+            try:
+                p = _Player()
+                p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
+                if self.call._is_call_active() and self.call._has_valid_port(self.call._audio_media):
+                    p.startTransmit(self.call._audio_media)
+                with self._lock:
+                    self._player = p
+                self.log.info("Segment playback", file=path, ms=str(dur))
+            except Exception:
+                exception(self.log, "Segment play failed", file=path)
+
+        self.cmdq.put(_play_next)
