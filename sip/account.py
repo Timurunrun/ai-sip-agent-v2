@@ -20,6 +20,8 @@ class Account(pj.Account):
         super().__init__()
         self.cmdq = cmdq
         self.sem_reg = threading.Semaphore(0)
+        # Track active Call objects to delete them before shutdown
+        self.calls: list[Call] = []
 
     def onRegState(self, prm):
         print(f"[SIP] Registration: {prm.reason}")
@@ -27,8 +29,10 @@ class Account(pj.Account):
             self.sem_reg.release()
 
     def onIncomingCall(self, prm):
-        temporary = Call(self, prm.callId)
-        ci = temporary.getInfo()
+        call = Call(self, prm.callId)
+        # Hold a strong reference so Python GC doesn't destroy it prematurely
+        self.calls.append(call)
+        ci = call.getInfo()
         print(f"[SIP] Incoming call from: {ci.remoteUri}")
 
         if "sipvicious" in ci.remoteUri.lower():
@@ -47,7 +51,6 @@ class Account(pj.Account):
             return
 
         # Create our Call object and answer from main thread
-        call = temporary
         ts = int(time.time())
         rec_path = TMP_DIR / f"call_{ts}.wav"
         call.prepare_recording(str(rec_path))

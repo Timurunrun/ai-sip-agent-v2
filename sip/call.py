@@ -25,6 +25,21 @@ class Call(pj.Call):
         self._stop_stream = threading.Event()
         self._rt: Optional[RealtimeClient] = None
         self._playing = False
+        # Cached helper to avoid pjsua_conf_disconnect asserts on invalid ports
+        # When media is torn down, conference slot id becomes -1; avoid stop/connect then.
+
+    def _has_valid_port(self, media: Optional[pj.AudioMedia]) -> bool:
+        try:
+            return bool(media) and media.getPortId() >= 0
+        except Exception:
+            return False
+
+    def _is_call_active(self) -> bool:
+        try:
+            ci = self.getInfo()
+            return ci.state == pj.PJSIP_INV_STATE_CONFIRMED
+        except Exception:
+            return False
 
     # Called on SIP state change
     def onCallState(self, prm):
@@ -32,12 +47,22 @@ class Call(pj.Call):
         print(f"[CALL] State: {ci.stateText} code={ci.lastStatusCode}")
         if ci.stateText == "DISCONNECTED":
             self._stop_stream.set()
-            try:
-                if self._tail:
-                    self._tail.close()
-            except Exception:
-                pass
             self._cleanup_media()
+            # Schedule deletion of this Call on the main thread and remove from account's tracking
+            def _finalize():
+                try:
+                    try:
+                        self.delete()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self.acc, 'calls') and self in self.acc.calls:
+                            self.acc.calls.remove(self)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            self.acc.cmdq.put(_finalize)
 
     # Called when media becomes active
     def onCallMediaState(self, prm):
@@ -88,6 +113,14 @@ class Call(pj.Call):
                     self._rt.close()
             except Exception:
                 pass
+            # Close tail reader from the streaming thread to avoid race with reads
+            try:
+                if self._tail:
+                    self._tail.close()
+            except Exception:
+                pass
+            finally:
+                self._tail = None
 
     def _on_bot_text(self, text: str):
         print(f"[BOT] {text}")
@@ -103,16 +136,18 @@ class Call(pj.Call):
     def _play_file(self, path: str):
         def _do():
             try:
-                if not self._audio_media:
+                if not self._is_call_active() or not self._has_valid_port(self._audio_media):
                     return
                 if self._player:
                     try:
-                        self._player.stopTransmit(self._audio_media)
+                        if self._is_call_active() and self._has_valid_port(self._player) and self._has_valid_port(self._audio_media):
+                            self._player.stopTransmit(self._audio_media)
                     except Exception:
                         pass
                 self._player = pj.AudioMediaPlayer()
                 self._player.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
-                self._player.startTransmit(self._audio_media)
+                if self._is_call_active() and self._has_valid_port(self._audio_media) and self._has_valid_port(self._player):
+                    self._player.startTransmit(self._audio_media)
                 self._playing = True
             except Exception as e:
                 print(f"[CALL] play error: {e}")
@@ -120,7 +155,7 @@ class Call(pj.Call):
 
     def _stop_playback(self):
         def _do():
-            if self._player and self._audio_media:
+            if self._is_call_active() and self._player and self._has_valid_port(self._player) and self._has_valid_port(self._audio_media):
                 try:
                     self._player.stopTransmit(self._audio_media)
                 except Exception:
@@ -132,10 +167,10 @@ class Call(pj.Call):
 
     def _cleanup_media(self):
         def _do():
-            try:
-                if self._player and self._audio_media:
-                    self._player.stopTransmit(self._audio_media)
-            except Exception:
-                pass
+            # At call teardown, the conference bridge may already be destroyed.
+            # Avoid any stopTransmit/connect calls here to prevent pjmedia_conf assertions.
             self._player = None
+            self._recorder = None
+            # Mark media as gone to avoid future attempts
+            self._audio_media = None
         self.acc.cmdq.put(_do)

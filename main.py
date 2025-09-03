@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import threading
+import gc
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -72,13 +73,60 @@ async def main():
     try:
         await pjsua_pump(ep, cmdq, stop_event)
     finally:
-        # Destroy SIP stack
+        # Graceful shutdown sequence
         try:
-            acc.delete()
-        except Exception:
-            pass
-        ep.libDestroy()
-        print("[BOOT] Stopped.")
+            # Hang up all calls first to trigger DISCONNECTED and onCallState cleanup
+            try:
+                ep.hangupAllCalls()
+            except Exception:
+                pass
+            # Pump events longer to fully drain callbacks and queued cleanups
+            for _ in range(200):  # ~2s total
+                try:
+                    ep.libHandleEvents(10)
+                except Exception:
+                    pass
+                try:
+                    cmdq.execute_pending()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.01)
+
+            # Proactively delete any remaining Call objects tracked by the account
+            try:
+                if hasattr(acc, 'calls'):
+                    for c in list(acc.calls):
+                        try:
+                            c.delete()
+                        except Exception:
+                            pass
+                    acc.calls.clear()
+            except Exception:
+                pass
+
+            # Delete account before destroying endpoint/lib
+            try:
+                acc.delete()
+            except Exception:
+                pass
+
+            # Drop strong refs and force GC while lib is still alive
+            try:
+                del acc
+            except Exception:
+                pass
+            gc.collect()
+        finally:
+            try:
+                ep.libDestroy()
+            finally:
+                # Ensure Endpoint wrapper is also collected now
+                try:
+                    del ep
+                except Exception:
+                    pass
+                gc.collect()
+                print("[BOOT] Stopped.")
 
 
 if __name__ == "__main__":
