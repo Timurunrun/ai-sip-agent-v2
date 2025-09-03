@@ -34,8 +34,6 @@ class Call(pj.Call):
             cid = None
         self._call_id = str(cid or id(self))
         self.log = bind(get_logger("sip.call"), call_id=self._call_id)
-        # Cached helper to avoid pjsua_conf_disconnect asserts on invalid ports
-        # When media is torn down, conference slot id becomes -1; avoid stop/connect then.
 
     def _has_valid_port(self, media: Optional[pj.AudioMedia]) -> bool:
         try:
@@ -62,6 +60,7 @@ class Call(pj.Call):
             except Exception:
                 exception(self.log, "Streamer close failed")
             self._cleanup_media()
+
             # Schedule deletion of this Call on the main thread and remove from account's tracking
             def _finalize():
                 try:
@@ -113,10 +112,9 @@ class Call(pj.Call):
     def _stream_loop(self):
         try:
             self._rt.connect()
-            # Configure session with audio in/out
-            self._rt.update_session()
-            # Create tail reader after header exists
-            self._tail = TailWavReader(self._recording_path, wait_for_header=True)
+            self._rt.update_session()                                               # Configure session with audio in/out
+            self._tail = TailWavReader(self._recording_path, wait_for_header=True)  # Create tail reader after header exists
+            
             # Send audio frames as they appear (TailWavReader will pick ~20ms frames)
             for chunk in self._tail.iter_chunks(stop_event=self._stop_stream):
                 self._rt.send_audio_chunk(chunk)
@@ -129,6 +127,7 @@ class Call(pj.Call):
                     self._rt.close()
             except Exception:
                 pass
+
             # Close tail reader from the streaming thread to avoid race with reads
             try:
                 if self._tail:
@@ -163,7 +162,6 @@ class Call(pj.Call):
             # Avoid any stopTransmit/connect calls here to prevent pjmedia_conf assertions.
             self._player = None
             self._recorder = None
-            # Mark media as gone to avoid future attempts
             self._audio_media = None
             self.log.debug("Media cleaned up")
         self.acc.cmdq.put(_do)
@@ -181,25 +179,24 @@ class BotAudioStreamer:
         self.call = call
         self.cmdq = call.acc.cmdq
         self.log = bind(get_logger("sip.stream"), call_id=call._call_id)
+        
         # Settings
         self.sample_rate = 8000
-        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "300"))
-        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "70"))
-        # Start next segment slightly before current ends to avoid gaps
-        self.overlap_ms = max(0, int(os.getenv("BOT_OVERLAP_MS", "20")))
+        self.segment_ms = int(os.getenv("BOT_SEGMENT_MS", "300"))               # Size of the server-sent chunk
+        self.jitter_ms = int(os.getenv("BOT_JITTER_MS", "100"))                 # Jitter-like waiting
+        self.overlap_ms = max(0, int(os.getenv("BOT_OVERLAP_MS", "10")))        # Start next segment slightly before current ends to avoid gaps
         self.segment_bytes = max(1, int(self.sample_rate * self.segment_ms / 1000))
+        
         # State
         self._buf = bytearray()
         self._queue: list[tuple[str, int]] = []  # (path, duration_ms)
         self._queued_ms = 0
         self._started = False
         self._end_of_response = False
-        # Active player (currently transmitting)
-        self._player: Optional[pj.AudioMediaPlayer] = None
-        # Preloaded player prepared for seamless start
-        self._preloaded: Optional[pj.AudioMediaPlayer] = None
-        # Internal timing helper for overlap scheduling
-        self._current_end_ts: float = 0.0
+        
+        self._player: Optional[pj.AudioMediaPlayer] = None      # Active player (currently transmitting)
+        self._preloaded: Optional[pj.AudioMediaPlayer] = None   # Preloaded player prepared for seamless start
+        self._current_end_ts: float = 0.0                       # Internal timing helper for overlap scheduling
         self._lock = threading.Lock()
         self._counter = 0
 
@@ -221,8 +218,7 @@ class BotAudioStreamer:
                 self._emit_segment_locked(bytes(self._buf), int(len(self._buf) * 1000 / self.sample_rate))
                 self._buf.clear()
             self._end_of_response = True
-            # If playback is ongoing and player is idle, try to start next
-            self._maybe_start_locked()
+            self._maybe_start_locked()      # If playback is ongoing and player is idle, try to start next
 
     def close(self):
         with self._lock:
@@ -230,6 +226,7 @@ class BotAudioStreamer:
             self._queued_ms = 0
             self._buf.clear()
             self._end_of_response = True
+
             # Stop player on main thread
             if self._player:
                 p = self._player
@@ -258,6 +255,7 @@ class BotAudioStreamer:
 
     def _emit_segment_locked(self, ulaw_chunk: bytes, duration_ms: int):
         from audio.g711_wav import write_mulaw_wav
+
         # Use same directory as recording to stay on same filesystem
         base = self.call._recording_path or f"/tmp/pjsua_recordings_v2/call_{int(time.time())}.wav"
         path = base.replace('.wav', f"_stream_{self._counter}.wav")
@@ -302,12 +300,11 @@ class BotAudioStreamer:
                     p.startTransmit(self.call._audio_media)
                 with self._lock:
                     self._player = p
-                    # Compute expected end timestamp for overlap scheduling
-                    self._current_end_ts = time.monotonic() + max(0.0, float(dur) / 1000.0)
-                self.log.info("Segment playback", file=path, ms=str(dur))
+                    self._current_end_ts = time.monotonic() + max(0.0, float(dur) / 1000.0)     # Compute expected end timestamp for overlap scheduling
+                
                 # Try to preload the next segment (if any) to remove file open latency
+                self.log.info("Segment playback", file=path, ms=str(dur))
                 self._try_preload_next()
-                # Schedule an early start of the preloaded segment to avoid inter-chunk gap
                 self._schedule_overlap_start(dur)
             except Exception:
                 exception(self.log, "Segment play failed", file=path)
@@ -383,7 +380,7 @@ class BotAudioStreamer:
                 pre = self._preloaded
                 cur = self._player
                 still_time = self._current_end_ts - time.monotonic()
-            if pre and cur and still_time > -0.25:  # within reasonable window
+            if pre and cur and still_time > -0.25:      # within reasonable window
                 def _start_preloaded():
                     if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
                         return

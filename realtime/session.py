@@ -31,19 +31,15 @@ class RealtimeClient:
         self._open_evt = threading.Event()
         self._send_lock = threading.Lock()
         self._ws_thread: Optional[threading.Thread] = None
-        # When streaming, emit audio as soon as deltas arrive. We still
-        # keep a tiny scratch buffer to hold partial state between messages
-        # if needed, but we do not wait for response.done.
         self._buffered_audio: bytearray = bytearray()
-        # Default to 8 kHz since output is PCMU (G.711 µ-law)
-        self._current_sr = 8000
+        self._current_sr = 8000     # PCMU (G.711 µ-law)
         
         self.log = get_logger("realtime")
         if context:
             self.log = bind(self.log, **context)
 
     def connect(self):
-        url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+        url = f"wss://api.openai.com/v1/realtime?model={os.environ.get("OPENAI_MODEL", "gpt-realtime")}"
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
@@ -58,7 +54,6 @@ class RealtimeClient:
             try:
                 data = json.loads(message)
             except Exception:
-                # some servers may send binary events separately; ignore
                 return
             t = data.get("type")
             # Collect audio delta variants (accept both 'audio' and 'delta' keys)
@@ -142,7 +137,7 @@ class RealtimeClient:
             "- Respond in the Russian language.\n"
             "- Use short, natural phrases; avoid repetition.\n"
             "- If audio is unintelligible, ask to repeat concisely.\n"
-            "- Keep answers under two sentences; speak FAST, human-like, but calm.\n"
+            "- Keep answers under two sentences; speak VERY FAST, human-like.\n"
         )
         self.send(event)
 

@@ -15,8 +15,7 @@ class CommandQueue:
 
     def put(self, func: Callable, *args: Any, **kwargs: Any) -> None:
         self._q.put((func, args, kwargs))
-        # Debug-level to avoid chatty logs by default
-        self._log.debug("Enqueued", size=str(self._q.qsize()))
+        self._log.debug("Enqueued", size=str(self._q.qsize()))      # debug-level
 
     def execute_pending(self) -> None:
         while True:

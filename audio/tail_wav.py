@@ -51,8 +51,7 @@ class TailWavReader:
                 if not data:
                     break
                 self._offset += len(data)
-                yield data
-                # Quick yield to caller
+                yield data      # Quick yield to caller
             time.sleep(poll_interval)
 
     def close(self):
