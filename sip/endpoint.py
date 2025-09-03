@@ -35,9 +35,11 @@ def create_endpoint() -> pj.Endpoint:
     ep_cfg = pj.EpConfig()
     ep_cfg.logConfig.level = 3
     ep_cfg.logConfig.consoleLevel = 3
+
     # Install filtered log writer to suppress noisy benign errors
     _writer = _FilteredLogWriter()
     ep_cfg.logConfig.writer = _writer
+
     ep_cfg.uaConfig.maxCalls = 32
     ep_cfg.uaConfig.userAgent = "AI SIP Agent v2"
     ep_cfg.medConfig.quality = 6
@@ -52,7 +54,6 @@ def create_endpoint() -> pj.Endpoint:
     ep_cfg.medConfig.jbMaxPre = 100
 
     ep.libInit(ep_cfg)
-    # Keep a strong reference so the writer isn't GC'ed
     setattr(ep, "_log_writer", _writer)
 
     transport_cfg = pj.TransportConfig()
