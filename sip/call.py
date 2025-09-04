@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 import threading
 from typing import Optional
 from collections import deque
@@ -318,7 +319,7 @@ class BotAudioStreamer:
         from audio.g711_wav import write_mulaw_wav
 
         # Use same directory as recording to stay on same filesystem
-        base = self.call._recording_path or f"/tmp/pjsua_recordings_v2/call_{int(time.time())}.wav"
+        base = self.call._recording_path or f"/tmp/pjsua_recordings_v2/call_{uuid.uuid4().hex}.wav"
         path = base.replace('.wav', f"_stream_{self._counter}.wav")
         self._counter += 1
         try:

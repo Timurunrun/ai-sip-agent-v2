@@ -1,6 +1,6 @@
 import os
 import re
-import time
+import uuid
 from pathlib import Path
 import threading
 
@@ -55,8 +55,8 @@ class Account(pj.Account):
             return
 
         # Create our Call object and answer from main thread
-        ts = int(time.time())
-        rec_path = TMP_DIR / f"call_{ts}.wav"
+        rec_id = uuid.uuid4().hex
+        rec_path = TMP_DIR / f"call_{rec_id}.wav"
         call.prepare_recording(str(rec_path))
         clog.info("Prepared recording", path=str(rec_path))
 
