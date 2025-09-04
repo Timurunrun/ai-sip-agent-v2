@@ -259,6 +259,7 @@ class BotAudioStreamer:
         
         self._player: Optional[pj.AudioMediaPlayer] = None      # Active player (currently transmitting)
         self._preloaded: Optional[pj.AudioMediaPlayer] = None   # Preloaded player prepared for seamless start
+        self._preloaded_started: bool = False                    # Guard to avoid double start of preloaded
         self._lock = threading.Lock()
         self._counter = 0
 
@@ -288,6 +289,7 @@ class BotAudioStreamer:
             self._queued_ms = 0
             self._buf.clear()
             self._end_of_response = True
+            self._preloaded_started = False
 
             # Stop player on main thread
             if self._player:
@@ -390,6 +392,7 @@ class BotAudioStreamer:
                 np = self._create_player_for(next_path)
                 with self._lock:
                     self._preloaded = np
+                    self._preloaded_started = False
                 self.log.debug("Preloaded next segment", file=next_path)
             except Exception:
                 exception(self.log, "Preload failed", file=next_path)
@@ -445,9 +448,17 @@ class BotAudioStreamer:
                 pre = self._preloaded
                 cur = self._player
                 still_time = self._current_end_ts - time.monotonic()
+                # Guard: ensure we enqueue start for a given preloaded only once
+                if pre and not self._preloaded_started:
+                    self._preloaded_started = True
+                else:
+                    pre = None  # Nothing to start or already enqueued
             if pre and cur and still_time > -0.25:      # within reasonable window
                 def _start_preloaded():
                     if not self.call._is_call_active() or not self.call._has_valid_port(self.call._audio_media):
+                        # Reset guard to allow retry if conditions change
+                        with self._lock:
+                            self._preloaded_started = False
                         return
                     try:
                         pre.startTransmit(self.call._audio_media)
@@ -456,6 +467,7 @@ class BotAudioStreamer:
                             # Transition: new becomes the active player
                             self._player = pre
                             self._preloaded = None
+                            self._preloaded_started = False
 
                             # Remove the just-started path from queue since it's now playing
                             if self._queue:
@@ -476,6 +488,9 @@ class BotAudioStreamer:
                         self.log.debug("Overlap start", ms=str(self.overlap_ms))
                     except Exception:
                         exception(self.log, "Overlap start failed")
+                        with self._lock:
+                            # Allow retry on failure
+                            self._preloaded_started = False
                 self.cmdq.put(_start_preloaded)
             else:
                 # If not ready yet and current hasn't finished, retry shortly
@@ -520,6 +535,7 @@ class BotAudioStreamer:
             pre = self._preloaded
             self._player = None
             self._preloaded = None
+            self._preloaded_started = False
 
             def _stop_active():
                 try:
@@ -565,6 +581,7 @@ class BotAudioStreamer:
             self._buf.clear()
             self._started = False
             self._end_of_response = False
+            self._preloaded_started = False
             self.log.debug("New response tracking", item_id=str(item_id))
 
     def current_item_id(self) -> Optional[str]:
