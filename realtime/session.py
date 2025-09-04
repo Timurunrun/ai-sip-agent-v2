@@ -131,6 +131,9 @@ class RealtimeClient:
 
     def update_session(self):
         prompt_id = os.environ.get("REALTIME_PROMPT_ID")
+        vad_eagerness = os.getenv("REALTIME_VAD_EAGERNESS", "high")
+        voice = os.getenv("REALTIME_VOICE", "cedar")
+
         event = {
             "type": "session.update",
             "session": {
@@ -142,14 +145,14 @@ class RealtimeClient:
                         "format": {"type": "audio/pcm", "rate": 24000},
                         "turn_detection": {
                             "type": "semantic_vad",
-                            "eagerness": "high",
+                            "eagerness": vad_eagerness,
                             "create_response": True,
                             "interrupt_response": True,
                         },
                     },
                     "output": {
                         "format": {"type": "audio/pcmu"},
-                        "voice": "cedar",
+                        "voice": voice,
                         "speed": 1,
                     },
                 },
