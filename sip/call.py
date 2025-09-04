@@ -161,15 +161,14 @@ class Call(pj.Call):
     def _on_vad_speech_started(self, event: dict):
         # Server-side VAD detected user speech during playback: interrupt and truncate
         try:
-            # If there's nothing playing/buffered yet (e.g., at call start), do nothing
-            has_audio = False
+            is_playing = False
             if self._bot_streamer:
                 try:
-                    has_audio = self._bot_streamer.has_pending_or_playing()
+                    is_playing = self._bot_streamer.is_playing()
                 except Exception:
-                    has_audio = False
-            if not has_audio:
-                self.log.debug("VAD early; nothing to interrupt yet")
+                    is_playing = False
+            if not is_playing:
+                self.log.debug("VAD detected but no playback active; ignore")
                 return
             self.log.info("VAD speech started; interrupting playback")
 
@@ -180,10 +179,19 @@ class Call(pj.Call):
                 except Exception:
                     exception(self.log, "Failed to compute/interrupt playback progress")
             item_id = None
+
             try:
-                item_id = self._rt.current_assistant_item_id if self._rt else None
+                if self._bot_streamer:
+                    item_id = self._bot_streamer.current_item_id()
             except Exception:
                 item_id = None
+
+            # Fallback to realtime's last-seen item id if needed
+            if not item_id:
+                try:
+                    item_id = self._rt.current_assistant_item_id if self._rt else None
+                except Exception:
+                    item_id = None
             if item_id:
                 try:
                     self._rt.send_truncate(item_id, played_ms)
@@ -442,24 +450,28 @@ class BotAudioStreamer:
                         return
                     try:
                         pre.startTransmit(self.call._audio_media)
+                        next_dur_local = None
                         with self._lock:
                             # Transition: new becomes the active player
                             self._player = pre
                             self._preloaded = None
+
                             # Remove the just-started path from queue since it's now playing
                             if self._queue:
                                 # Pop the first queued item as it's now started
-                                path_started, next_dur = self._queue.pop(0)
-                                self._queued_ms = max(0, self._queued_ms - next_dur)
+                                path_started, next_dur_local = self._queue.pop(0)
+                                self._queued_ms = max(0, self._queued_ms - next_dur_local)
+
                                 # Update expected end based on the new segment
-                                self._current_end_ts = time.monotonic() + max(0.0, float(next_dur) / 1000.0)
-                                self._current_seg_dur_ms = int(next_dur)
+                                self._current_end_ts = time.monotonic() + max(0.0, float(next_dur_local) / 1000.0)
+                                self._current_seg_dur_ms = int(next_dur_local)
                                 self._current_seg_start_ts = time.monotonic()
-                        # After starting, immediately try to preload the subsequent one
-                        self._try_preload_next()
+                        
+                        self._try_preload_next()    # After starting, immediately try to preload the subsequent one
+                        
                         # And schedule overlap again for the now-active segment
-                        # Use the duration of the started segment
-                        self._schedule_overlap_start(next_dur)
+                        if next_dur_local is not None:
+                            self._schedule_overlap_start(next_dur_local)
                         self.log.debug("Overlap start", ms=str(self.overlap_ms))
                     except Exception:
                         exception(self.log, "Overlap start failed")
@@ -552,7 +564,12 @@ class BotAudioStreamer:
             self._buf.clear()
             self._started = False
             self._end_of_response = False
+            self.log.debug("New response tracking", item_id=str(item_id))
 
-    def has_pending_or_playing(self) -> bool:
+    def current_item_id(self) -> Optional[str]:
         with self._lock:
-            return bool(self._player or self._preloaded or self._queue or self._buf or self._received_ms_total)
+            return self._response_item_id
+
+    def is_playing(self) -> bool:
+        with self._lock:
+            return bool(self._player)
