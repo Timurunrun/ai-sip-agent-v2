@@ -76,8 +76,13 @@ class Account(pj.Account):
         # Create our Call object and answer from main thread
         rec_id = uuid.uuid4().hex
         rec_path = TMP_DIR / f"call_{rec_id}.wav"
-        call.prepare_recording(str(rec_path), digits_only)
-        clog.info("Prepared recording", path=str(rec_path))
+        stereo_path = TMP_DIR / f"call_{rec_id}_stereo.wav"
+        call.prepare_recording(str(rec_path), digits_only, stereo_path=str(stereo_path))
+        clog.info(
+            "Prepared recording",
+            path=str(rec_path),
+            stereo_path=str(stereo_path),
+        )
 
         def _answer():
             prm = pj.CallOpParam()
@@ -89,3 +94,4 @@ class Account(pj.Account):
                 exception(clog, "Answer failed")
 
         self.cmdq.put(_answer)
+

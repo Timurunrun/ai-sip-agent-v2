@@ -1,3 +1,4 @@
+import audioop
 import os
 import time
 import uuid
@@ -8,6 +9,7 @@ from collections import deque
 import pjsua2 as pj
 
 from audio.tail_wav import TailWavReader
+from audio.conversation_recorder import ConversationRecorder
 from realtime.session import RealtimeClient
 from utils.logging import get_logger, bind, exception
 
@@ -24,6 +26,7 @@ class Call(pj.Call):
         self._recorder: Optional[pj.AudioMediaRecorder] = None
         self._player: Optional[pj.AudioMediaPlayer] = None
         self._recording_path: Optional[str] = None
+        self._stereo_recording_path: Optional[str] = None
         self._tail: Optional[TailWavReader] = None
         self._stream_thread: Optional[threading.Thread] = None
         self._stop_stream = threading.Event()
@@ -35,6 +38,10 @@ class Call(pj.Call):
         self._greeting_player: Optional[pj.AudioMediaPlayer] = None
         self._greeting_requested = False
         self._greeting_done = False
+        self._conversation_recorder: Optional[ConversationRecorder] = None
+        self._stereo_sample_rate: Optional[int] = None
+        self._assistant_rate_state = None
+        self._assistant_pending: deque[tuple[bytes, int]] = deque()
         try:
             ci = self.getInfo()
             cid = getattr(ci, "callIdString", None)
@@ -101,8 +108,10 @@ class Call(pj.Call):
                     # Start tailing thread to stream to realtime
                     self._start_streaming_thread()
 
-    def prepare_recording(self, wav_path: str, phone: Optional[str] = None):
+    def prepare_recording(self, wav_path: str, phone: Optional[str] = None, stereo_path: Optional[str] = None):
         self._recording_path = wav_path
+        if stereo_path:
+            self._stereo_recording_path = stereo_path
         if phone:
             self._phone = phone
 
@@ -128,9 +137,13 @@ class Call(pj.Call):
             self._ensure_greeting_playback()
             self._rt.update_session()                                               # Configure session with audio in/out
             self._tail = TailWavReader(self._recording_path, wait_for_header=True)  # Create tail reader after header exists
+
+            self._stereo_sample_rate = getattr(self._tail, "sample_rate", None) or self._stereo_sample_rate
+            self._start_conversation_recorder()
             
             # Send audio frames as they appear (TailWavReader will pick ~20ms frames)
             for chunk in self._tail.iter_chunks(stop_event=self._stop_stream):
+                self._record_caller_audio(chunk)
                 self._rt.send_audio_chunk(chunk)
 
         except Exception:
@@ -150,6 +163,10 @@ class Call(pj.Call):
                 pass
             finally:
                 self._tail = None
+            try:
+                self._close_conversation_recorder()
+            except Exception:
+                pass
 
     def _ensure_greeting_playback(self):
         if self._greeting_requested or self._greeting_done:
@@ -223,6 +240,78 @@ class Call(pj.Call):
         p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
         return p
 
+    def _start_conversation_recorder(self):
+        path = self._stereo_recording_path
+        if not path:
+            return
+        sample_rate = self._stereo_sample_rate or 8000
+        try:
+            self._conversation_recorder = ConversationRecorder(path, sample_rate)
+            self._assistant_rate_state = None
+            self.log.info(
+                "Stereo conversation recording started",
+                path=path,
+                sample_rate=str(sample_rate),
+            )
+            self._flush_pending_assistant_audio()
+        except Exception:
+            self._conversation_recorder = None
+            exception(self.log, "Failed to start stereo recorder", path=str(path))
+
+    def _flush_pending_assistant_audio(self):
+        if not self._conversation_recorder:
+            return
+        while self._assistant_pending:
+            data, rate = self._assistant_pending.popleft()
+            self._write_assistant_audio(data, rate)
+
+    def _record_caller_audio(self, pcm16_bytes: bytes):
+        if not pcm16_bytes:
+            return
+        recorder = self._conversation_recorder
+        if not recorder:
+            return
+        try:
+            recorder.write_caller(pcm16_bytes)
+        except Exception:
+            exception(self.log, "Failed to write caller audio")
+
+    def _write_assistant_audio(self, ulaw_bytes: bytes, sample_rate: int):
+        if not ulaw_bytes:
+            return
+        recorder = self._conversation_recorder
+        if not recorder:
+            if self._stereo_recording_path:
+                self._assistant_pending.append((bytes(ulaw_bytes), sample_rate))
+            return
+        target_rate = self._stereo_sample_rate or sample_rate or 8000
+        try:
+            pcm = audioop.ulaw2lin(ulaw_bytes, 2)
+            if target_rate and sample_rate and target_rate != sample_rate:
+                pcm, self._assistant_rate_state = audioop.ratecv(
+                    pcm,
+                    2,
+                    1,
+                    sample_rate,
+                    target_rate,
+                    self._assistant_rate_state,
+                )
+            recorder.write_assistant(pcm)
+        except Exception:
+            exception(self.log, "Failed to write assistant audio")
+
+    def _close_conversation_recorder(self):
+        recorder = self._conversation_recorder
+        self._conversation_recorder = None
+        self._assistant_pending.clear()
+        self._assistant_rate_state = None
+        if not recorder:
+            return
+        try:
+            recorder.close()
+        finally:
+            self.log.info("Stereo conversation recording closed", path=str(getattr(recorder, "path", "")))
+
     def _on_bot_text(self, text: str):
         self.log.debug("Bot text", text=text)
 
@@ -234,6 +323,7 @@ class Call(pj.Call):
             self._bot_streamer.feed(audio_bytes, sample_rate or 8000)
         except Exception:
             exception(self.log, "Bot streamer feed failed")
+        self._write_assistant_audio(audio_bytes, sample_rate or 8000)
 
     def _on_bot_audio_done(self):
         if self._bot_streamer:
@@ -333,10 +423,21 @@ class Call(pj.Call):
             self.log.debug("Pipeline skipped due to missing phone or recording path")
             return
         self._processing_dispatched = True
+        pipeline_path = self._recording_path
         try:
-            pipeline.submit(self._phone, self._recording_path, call_id=self._call_id)
+            stereo_path = self._stereo_recording_path
+            if stereo_path and os.path.isfile(stereo_path):
+                pipeline_path = stereo_path
+            elif self._recording_path and os.path.isfile(self._recording_path):
+                pipeline_path = self._recording_path
+            pipeline.submit(self._phone, pipeline_path, call_id=self._call_id)
         except Exception:
-            exception(self.log, "Failed to submit pipeline job", phone=str(self._phone), path=str(self._recording_path))
+            exception(
+                self.log,
+                "Failed to submit pipeline job",
+                phone=str(self._phone),
+                path=str(pipeline_path or self._recording_path),
+            )
 
 
 class BotAudioStreamer:
@@ -705,3 +806,4 @@ class BotAudioStreamer:
     def is_playing(self) -> bool:
         with self._lock:
             return bool(self._player)
+

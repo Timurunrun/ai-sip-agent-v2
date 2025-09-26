@@ -306,11 +306,16 @@ class CallProcessingPipeline:
         if not transcript:
             return ""
 
-        pattern = re.compile(r"^\[[^\]]+\]\s*")
+        pattern = re.compile(r"^\[(?P<label>[^\]@]+)(?:\s*@[^\]]+)?\]\s*(?P<text>.*)")
         cleaned_lines: list[str] = []
         for raw_line in transcript.splitlines():
-            line = pattern.sub("", raw_line).strip()
-            cleaned_lines.append(line)
+            match = pattern.match(raw_line)
+            if match:
+                label = (match.group("label") or "").strip() or "Спикер"
+                text = (match.group("text") or "").strip()
+                cleaned_lines.append(f"{label}: {text}" if text else f"{label}:")
+            else:
+                cleaned_lines.append(raw_line.strip())
         return "\n".join(cleaned_lines)
 
     def _ensure_recording_ready(self, wav_path: str, log) -> None:
