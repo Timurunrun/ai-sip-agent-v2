@@ -227,7 +227,10 @@ class CallProcessingPipeline:
         if not isinstance(summary, dict):
             return
         try:
-            save_summary(phone, summary, call_id=call_id)
+            normalized = save_summary(phone, summary, call_id=call_id)
+            if isinstance(normalized, dict):
+                summary["highlights"] = normalized.get("highlights", summary.get("highlights"))
+                summary["answered_questions"] = normalized.get("answered_questions", summary.get("answered_questions", []))
             log.debug("Conversation summary saved")
         except Exception:
             exception(log, "Failed to save conversation summary")

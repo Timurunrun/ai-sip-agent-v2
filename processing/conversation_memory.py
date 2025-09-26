@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from utils.logging import get_logger
 
@@ -14,11 +14,51 @@ _LOCK = Lock()
 _BASE_DIR = Path(os.getenv("CONVERSATION_SUMMARY_DIR", "logs/conversation_summaries"))
 
 
-def _summary_path(phone: str) -> Path:
-    phone_slug = "".join(ch for ch in str(phone) if ch.isdigit()) or str(phone).strip()
+def _slug_for_phone(phone: str) -> str:
+    phone_slug = "".join(ch for ch in str(phone) if ch.isdigit())
+    if not phone_slug:
+        phone_slug = str(phone).strip()
     if not phone_slug:
         phone_slug = "unknown"
-    return _BASE_DIR / f"{phone_slug}.json"
+    return phone_slug
+
+
+def _legacy_path(slug: str) -> Path:
+    return _BASE_DIR / f"{slug}.json"
+
+
+def _indexed_path(slug: str, index: int) -> Path:
+    return _BASE_DIR / f"{slug}_{index}.json"
+
+
+def _extract_index(slug: str, path: Path) -> Optional[int]:
+    stem = path.stem
+    if stem == slug:
+        return 0
+    prefix = f"{slug}_"
+    if stem.startswith(prefix):
+        suffix = stem[len(prefix) :]
+        try:
+            return int(suffix)
+        except ValueError:
+            return None
+    return None
+
+
+def _list_summary_files(slug: str) -> list[Tuple[int, Path]]:
+    candidates: list[Tuple[int, Path]] = []
+    legacy = _legacy_path(slug)
+    if legacy.is_file():
+        candidates.append((0, legacy))
+    for path in _BASE_DIR.glob(f"{slug}_*.json"):
+        if not path.is_file():
+            continue
+        idx = _extract_index(slug, path)
+        if idx is None:
+            continue
+        candidates.append((idx, path))
+    candidates.sort(key=lambda item: item[0])
+    return candidates
 
 
 def _normalize_summary(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -50,19 +90,33 @@ def _normalize_summary(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def save_summary(phone: str, summary: Dict[str, Any], *, call_id: Optional[str] = None) -> None:
+def save_summary(phone: str, summary: Dict[str, Any], *, call_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not phone or not isinstance(summary, dict):
-        return
+        return None
 
     normalized = _normalize_summary(summary)
     if normalized is None:
-        return
+        return None
+
+    previous_entry = load_summary(phone)
+    if previous_entry:
+        previous_answers = previous_entry.get("summary", {}).get("answered_questions") or []
+        combined: list[str] = []
+        for answer in list(previous_answers) + list(normalized["answered_questions"]):
+            answer_text = str(answer or "").strip()
+            if not answer_text:
+                continue
+            if answer_text not in combined:
+                combined.append(answer_text)
+        normalized["answered_questions"] = combined
+
+    slug = _slug_for_phone(phone)
 
     try:
         _BASE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
         _LOG.warning("Failed to create summary directory", error=str(exc), path=str(_BASE_DIR))
-        return
+        return normalized
 
     payload = {
         "phone": phone,
@@ -72,24 +126,45 @@ def save_summary(phone: str, summary: Dict[str, Any], *, call_id: Optional[str] 
     if call_id:
         payload["call_id"] = call_id
 
-    path = _summary_path(phone)
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+
     with _LOCK:
+        legacy = _legacy_path(slug)
+        target_legacy = _indexed_path(slug, 0)
+        if legacy.is_file() and not target_legacy.exists():
+            try:
+                legacy.rename(target_legacy)
+            except Exception as exc:
+                _LOG.warning("Failed to migrate legacy summary file", error=str(exc), path=str(legacy))
+
+        existing = _list_summary_files(slug)
+        next_index = existing[-1][0] + 1 if existing else 0
+        target_path = _indexed_path(slug, next_index)
+
         try:
-            path.write_text(serialized, encoding="utf-8")
+            target_path.write_text(serialized, encoding="utf-8")
         except Exception as exc:
-            _LOG.warning("Failed to persist conversation summary", error=str(exc), path=str(path))
+            _LOG.warning("Failed to persist conversation summary", error=str(exc), path=str(target_path))
+
+    return normalized
 
 
 def load_summary(phone: str) -> Optional[Dict[str, Any]]:
     if not phone:
         return None
 
-    path = _summary_path(phone)
-    if not path.is_file():
-        return None
+    slug = _slug_for_phone(phone)
 
     with _LOCK:
+        if not _BASE_DIR.exists():
+            return None
+
+        candidates = _list_summary_files(slug)
+        if not candidates:
+            return None
+
+        index, path = max(candidates, key=lambda item: item[0])
+
         try:
             raw = path.read_text(encoding="utf-8")
         except Exception as exc:
