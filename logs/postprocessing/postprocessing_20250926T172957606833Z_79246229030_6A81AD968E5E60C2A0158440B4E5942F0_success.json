@@ -1,0 +1,195 @@
+{
+    "timestamp": "2025-09-26T17:29:57.606833+00:00",
+    "phone": "79246229030",
+    "call_id": "6A81AD968E5E60C2A0158440B4E5942F-0",
+    "status": "success",
+    "deepgram_transcript": "[Caller @ 19.6s] 30 человек\n[Caller @ 21.0s] на постоянную основу.\n[Caller @ 32.7s] Кира 87.\n[Caller @ 42.6s] Да,\n[Caller @ 43.5s] предлагаю уже в холке.",
+    "gpt_structured": {
+        "answers": [
+            {
+                "question_id": 724653,
+                "text": "30",
+                "enum_ids": [],
+                "confidence": 0.95
+            },
+            {
+                "question_id": 732643,
+                "text": null,
+                "enum_ids": [
+                    985351
+                ],
+                "confidence": 0.95
+            },
+            {
+                "question_id": 729241,
+                "text": null,
+                "enum_ids": [
+                    978101
+                ],
+                "confidence": 0.9
+            },
+            {
+                "question_id": 731479,
+                "text": null,
+                "enum_ids": [
+                    986317,
+                    983485,
+                    983483
+                ],
+                "confidence": 0.6
+            },
+            {
+                "question_id": 724641,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724645,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724671,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 731375,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 729891,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727029,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732791,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 729555,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732795,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727059,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727061,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 731373,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732793,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732749,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724661,
+                "text": "Кира 87. предлагаю уже в холке.",
+                "enum_ids": [],
+                "confidence": 0.5
+            },
+            {
+                "question_id": 731521,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 728931,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            }
+        ]
+    },
+    "amo_custom_fields": [
+        {
+            "field_id": 724653,
+            "values": [
+                {
+                    "value": "30"
+                }
+            ]
+        },
+        {
+            "field_id": 732643,
+            "values": [
+                {
+                    "enum_id": 985351
+                }
+            ]
+        },
+        {
+            "field_id": 729241,
+            "values": [
+                {
+                    "enum_id": 978101
+                }
+            ]
+        },
+        {
+            "field_id": 731479,
+            "values": [
+                {
+                    "enum_id": 986317
+                },
+                {
+                    "enum_id": 983485
+                },
+                {
+                    "enum_id": 983483
+                }
+            ]
+        },
+        {
+            "field_id": 724661,
+            "values": [
+                {
+                    "value": "Кира 87. предлагаю уже в холке."
+                }
+            ]
+        }
+    ],
+    "lead_id": 29369737,
+    "prompt_transcript_context": "Transcript (flattened):\n30 человек\nна постоянную основу.\nКира 87.\nДа,\nпредлагаю уже в холке."
+}

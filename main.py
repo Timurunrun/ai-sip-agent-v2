@@ -16,6 +16,11 @@ from sip.account import Account
 from sip.command_queue import CommandQueue
 from utils.logging import setup_logging, get_logger, exception
 
+from integrations.deepgram import DeepgramClient
+from integrations.openai_structured import GPTStructuredExtractor
+from integrations.amocrm import AmoCRMClient
+from processing.pipeline import CallProcessingPipeline
+
 
 async def pjsua_pump(ep: pj.Endpoint, cmdq: CommandQueue, stop_event: threading.Event):
     """Pump PJSUA2 events and execute queued commands on the main thread."""
@@ -45,6 +50,35 @@ async def main():
         log.error("Missing SIP creds. Set SIP_DOMAIN, SIP_USER, SIP_PASSWD")
         raise SystemExit(1)
 
+    questions_path = Path(__file__).resolve().parent / "crm" / "questions.json"
+    try:
+        with questions_path.open("r", encoding="utf-8") as fp:
+            questions = json.load(fp)
+    except Exception as exc:
+        log.error("Failed to load questions metadata", error=str(exc), path=str(questions_path))
+        raise SystemExit(1) from exc
+
+    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+    amocrm_base = os.getenv("AMOCRM_BASE_URL")
+    amocrm_token = os.getenv("AMOCRM_ACCESS_TOKEN")
+
+    if not (deepgram_key and openai_key and amocrm_base and amocrm_token):
+        log.error("Missing integration credentials. Set DEEPGRAM_API_KEY, OPENAI_API_KEY, AMOCRM_BASE_URL, AMOCRM_ACCESS_TOKEN")
+        raise SystemExit(1)
+
+    pipeline = CallProcessingPipeline(
+        deepgram=DeepgramClient(deepgram_key, model=os.getenv("DEEPGRAM_MODEL", "nova-2")),
+        extractor=GPTStructuredExtractor(
+            openai_key,
+            questions,
+            model=os.getenv("OPENAI_STRUCTURED_MODEL", "gpt-5-mini"),
+        ),
+        amocrm=AmoCRMClient(amocrm_base, amocrm_token),
+        questions=questions,
+        max_workers=int(os.getenv("PIPELINE_MAX_WORKERS", "12")),
+    )
+
     ep = create_endpoint()
     adm = ep.audDevManager()
     adm.setNullDev()
@@ -63,7 +97,7 @@ async def main():
     cred = pj.AuthCredInfo("digest", "*", sip_user, 0, sip_password)
     acc_cfg.sipConfig.authCreds.append(cred)
 
-    acc = Account(cmdq)
+    acc = Account(cmdq, pipeline=pipeline)
     acc.create(acc_cfg)
 
     # Wait for reg in background (account signals semaphore internally)
@@ -139,6 +173,11 @@ async def main():
                     pass
                 gc.collect()
                 log.info("Stopped.")
+                try:
+                    if pipeline:
+                        pipeline.shutdown()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

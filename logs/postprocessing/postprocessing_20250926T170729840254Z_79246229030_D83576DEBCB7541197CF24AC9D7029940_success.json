@@ -1,0 +1,179 @@
+{
+    "timestamp": "2025-09-26T17:07:29.840254+00:00",
+    "phone": "79246229030",
+    "call_id": "D83576DEBCB7541197CF24AC9D702994-0",
+    "status": "success",
+    "deepgram_transcript": "[Caller @ 2.2s] Алло, здравствуйте, нам нужно питание на 10 человек на 38\n[Caller @ 6.0s] дней.\n[Caller @ 12.8s] Алло!\n[Caller @ 13.8s] Я\n[Caller @ 14.8s] говорю:\n[Caller @ 15.9s] Нам\n[Caller @ 16.9s] нужно\n[Caller @ 17.9s] питание\n[Caller @ 18.9s] на\n[Caller @ 19.9s] 10\n[Caller @ 20.9s] человек\n[Caller @ 21.9s] на\n[Caller @ 22.9s] 38\n[Caller @ 23.9s] дней!",
+    "gpt_structured": {
+        "answers": [
+            {
+                "question_id": 724653,
+                "text": "10",
+                "enum_ids": [],
+                "confidence": 0.95
+            },
+            {
+                "question_id": 732643,
+                "text": null,
+                "enum_ids": [
+                    985359
+                ],
+                "confidence": 0.9
+            },
+            {
+                "question_id": 729241,
+                "text": null,
+                "enum_ids": [
+                    978103
+                ],
+                "confidence": 0.8
+            },
+            {
+                "question_id": 731479,
+                "text": null,
+                "enum_ids": [
+                    986317
+                ],
+                "confidence": 0.7
+            },
+            {
+                "question_id": 724641,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724645,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724671,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 731375,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 729891,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727029,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732791,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 729555,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732795,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727059,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 727061,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 731373,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732793,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 732749,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 724661,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 731521,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            },
+            {
+                "question_id": 728931,
+                "text": null,
+                "enum_ids": [],
+                "confidence": null
+            }
+        ]
+    },
+    "amo_custom_fields": [
+        {
+            "field_id": 724653,
+            "values": [
+                {
+                    "value": "10"
+                }
+            ]
+        },
+        {
+            "field_id": 732643,
+            "values": [
+                {
+                    "enum_id": 985359
+                }
+            ]
+        },
+        {
+            "field_id": 729241,
+            "values": [
+                {
+                    "enum_id": 978103
+                }
+            ]
+        },
+        {
+            "field_id": 731479,
+            "values": [
+                {
+                    "enum_id": 986317
+                }
+            ]
+        }
+    ],
+    "lead_id": 29369737,
+    "prompt_transcript_context": "Transcript (flattened):\n[Caller @ 2.2s] Алло, здравствуйте, нам нужно питание на 10 человек на 38\n[Caller @ 6.0s] дней.\n[Caller @ 12.8s] Алло!\n[Caller @ 13.8s] Я\n[Caller @ 14.8s] говорю:\n[Caller @ 15.9s] Нам\n[Caller @ 16.9s] нужно\n[Caller @ 17.9s] питание\n[Caller @ 18.9s] на\n[Caller @ 19.9s] 10\n[Caller @ 20.9s] человек\n[Caller @ 21.9s] на\n[Caller @ 22.9s] 38\n[Caller @ 23.9s] дней!\n\nTranscript utterances (JSON):\n[{\"text\": \"Алло, здравствуйте, нам нужно питание на 10 человек на 38\", \"speaker\": null, \"start\": 2.1599998, \"end\": 5.54, \"confidence\": 0.9476563}, {\"text\": \"дней.\", \"speaker\": null, \"start\": 6.0, \"end\": 6.5, \"confidence\": 0.9182129}, {\"text\": \"Алло!\", \"speaker\": null, \"start\": 12.825, \"end\": 13.325, \"confidence\": 0.66711426}, {\"text\": \"Я\", \"speaker\": null, \"start\": 13.836249, \"end\": 14.336249, \"confidence\": 0.9086914}, {\"text\": \"говорю:\", \"speaker\": null, \"start\": 14.8475, \"end\": 15.3475, \"confidence\": 0.5053711}, {\"text\": \"Нам\", \"speaker\": null, \"start\": 15.858749, \"end\": 16.35875, \"confidence\": 0.9580078}, {\"text\": \"нужно\", \"speaker\": null, \"start\": 16.869999, \"end\": 17.369999, \"confidence\": 0.99902344}, {\"text\": \"питание\", \"speaker\": null, \"start\": 17.881248, \"end\": 18.381248, \"confidence\": 0.9951172}, {\"text\": \"на\", \"speaker\": null, \"start\": 18.892498, \"end\": 19.392498, \"confidence\": 0.9873047}, {\"text\": \"10\", \"speaker\": null, \"start\": 19.90375, \"end\": 20.40375, \"confidence\": 0.91845703}, {\"text\": \"человек\", \"speaker\": null, \"start\": 20.914999, \"end\": 21.414999, \"confidence\": 0.9902344}, {\"text\": \"на\", \"speaker\": null, \"start\": 21.926249, \"end\": 22.426249, \"confidence\": 0.98535156}, {\"text\": \"38\", \"speaker\": null, \"start\": 22.9375, \"end\": 23.4375, \"confidence\": 0.99121094}, {\"text\": \"дней!\", \"speaker\": null, \"start\": 23.94875, \"end\": 24.44875, \"confidence\": 0.76293945}]"
+}

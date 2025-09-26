@@ -28,6 +28,8 @@ class Call(pj.Call):
         self._stream_thread: Optional[threading.Thread] = None
         self._stop_stream = threading.Event()
         self._rt: Optional[RealtimeClient] = None
+        self._phone: Optional[str] = None
+        self._processing_dispatched = False
         self._playing = False
         self._bot_streamer: Optional["BotAudioStreamer"] = None
         self._greeting_player: Optional[pj.AudioMediaPlayer] = None
@@ -66,6 +68,7 @@ class Call(pj.Call):
             except Exception:
                 exception(self.log, "Streamer close failed")
             self._cleanup_media()
+            self._dispatch_pipeline()
 
             # Schedule deletion of this Call on the main thread and remove from account's tracking
             def _finalize():
@@ -98,8 +101,10 @@ class Call(pj.Call):
                     # Start tailing thread to stream to realtime
                     self._start_streaming_thread()
 
-    def prepare_recording(self, wav_path: str):
+    def prepare_recording(self, wav_path: str, phone: Optional[str] = None):
         self._recording_path = wav_path
+        if phone:
+            self._phone = phone
 
     def _start_streaming_thread(self):
         if not self._recording_path:
@@ -200,7 +205,7 @@ class Call(pj.Call):
                 def _cleanup():
                     am = call._audio_media
                     try:
-                        if call._has_valid_port(self_inner) and call._has_valid_port(am):
+                        if call._is_call_active() and call._has_valid_port(self_inner) and call._has_valid_port(am):
                             try:
                                 self_inner.stopTransmit(am)
                             except Exception:
@@ -301,7 +306,7 @@ class Call(pj.Call):
             self._greeting_player = None
             if gp:
                 try:
-                    if self._has_valid_port(gp) and self._has_valid_port(am):
+                    if self._is_call_active() and self._has_valid_port(gp) and self._has_valid_port(am):
                         try:
                             gp.stopTransmit(am)
                         except Exception:
@@ -317,6 +322,21 @@ class Call(pj.Call):
             self._audio_media = None
             self.log.debug("Media cleaned up")
         self.acc.cmdq.put(_do)
+
+    def _dispatch_pipeline(self) -> None:
+        if self._processing_dispatched:
+            return
+        pipeline = getattr(self.acc, "pipeline", None)
+        if not pipeline:
+            return
+        if not self._recording_path or not self._phone:
+            self.log.debug("Pipeline skipped due to missing phone or recording path")
+            return
+        self._processing_dispatched = True
+        try:
+            pipeline.submit(self._phone, self._recording_path, call_id=self._call_id)
+        except Exception:
+            exception(self.log, "Failed to submit pipeline job", phone=str(self._phone), path=str(self._recording_path))
 
 
 class BotAudioStreamer:
@@ -391,7 +411,7 @@ class BotAudioStreamer:
                 self._player = None
                 def _stop():
                     try:
-                        if self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
+                        if self.call._is_call_active() and self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
                             try:
                                 p.stopTransmit(self.call._audio_media)
                             except Exception:
@@ -504,7 +524,7 @@ class BotAudioStreamer:
             def onEof2(self_inner):
                 def _advance():
                     try:
-                        if call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
+                        if call._is_call_active() and call._has_valid_port(self_inner) and call._has_valid_port(call._audio_media):
                             try:
                                 self_inner.stopTransmit(call._audio_media)
                             except Exception:
@@ -633,7 +653,7 @@ class BotAudioStreamer:
 
             def _stop_active():
                 try:
-                    if p and self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
+                    if p and self.call._is_call_active() and self.call._has_valid_port(p) and self.call._has_valid_port(self.call._audio_media):
                         try:
                             p.stopTransmit(self.call._audio_media)
                         except Exception:
