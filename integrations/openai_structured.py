@@ -88,9 +88,22 @@ class GPTStructuredExtractor:
                         "required": ["question_id", "text", "enum_ids", "confidence"],
                         "additionalProperties": False,
                     },
-                }
+                },
+                "conversation_summary": {
+                    "type": "object",
+                    "properties": {
+                        "highlights": {"type": "string"},
+                        "answered_questions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 0,
+                        },
+                    },
+                    "required": ["highlights", "answered_questions"],
+                    "additionalProperties": False,
+                },
             },
-            "required": ["answers"],
+            "required": ["answers", "conversation_summary"],
             "additionalProperties": False,
         }
 

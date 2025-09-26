@@ -11,6 +11,7 @@ import pjsua2 as pj
 from audio.tail_wav import TailWavReader
 from audio.conversation_recorder import ConversationRecorder
 from realtime.session import RealtimeClient
+from processing.conversation_memory import load_summary
 from utils.logging import get_logger, bind, exception
 
 GREETING_WAV = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "audio_samples", "Hey.wav"))
@@ -42,6 +43,7 @@ class Call(pj.Call):
         self._stereo_sample_rate: Optional[int] = None
         self._assistant_rate_state = None
         self._assistant_pending: deque[tuple[bytes, int]] = deque()
+        self._summary_injected = False
         try:
             ci = self.getInfo()
             cid = getattr(ci, "callIdString", None)
@@ -136,6 +138,7 @@ class Call(pj.Call):
             self._rt.connect()
             self._ensure_greeting_playback()
             self._rt.update_session()                                               # Configure session with audio in/out
+            self._inject_previous_summary()
             self._tail = TailWavReader(self._recording_path, wait_for_header=True)  # Create tail reader after header exists
 
             self._stereo_sample_rate = getattr(self._tail, "sample_rate", None) or self._stereo_sample_rate
@@ -167,6 +170,63 @@ class Call(pj.Call):
                 self._close_conversation_recorder()
             except Exception:
                 pass
+
+    def _inject_previous_summary(self):
+        if self._summary_injected:
+            return
+        if not self._rt or not self._phone:
+            self._summary_injected = True
+            return
+        try:
+            entry = load_summary(self._phone)
+        except Exception:
+            self._summary_injected = True
+            exception(self.log, "Failed to load previous summary", phone=str(self._phone))
+            return
+        if not entry:
+            self._summary_injected = True
+            self.log.debug("No previous summary found", phone=str(self._phone))
+            return
+
+        summary = entry.get("summary") or {}
+        highlights = str(summary.get("highlights") or "").strip()
+        answered_questions = summary.get("answered_questions") or []
+        if not highlights and not answered_questions:
+            self._summary_injected = True
+            self.log.debug("Previous summary empty", phone=str(self._phone))
+            return
+
+        updated_at = entry.get("updated_at")
+        lines: list[str] = ["[Саммари прошлого разговора]"]
+        if updated_at:
+            lines.append(f"Дата обновления: {updated_at}")
+        if highlights:
+            lines.append(f"Ключевые моменты: {highlights}")
+        if answered_questions:
+            answered_str = ", ".join(str(v) for v in answered_questions)
+            lines.append(f"Ответы уже получены для вопросов: {answered_str}")
+        lines.append("Используй саммари, чтобы не задавать эти вопросы повторно без необходимости.")
+        payload = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "\n".join(lines),
+                    }
+                ],
+            },
+        }
+
+        try:
+            self._rt.send(payload)
+            self.log.info("Injected previous summary", phone=str(self._phone), updated_at=str(updated_at))
+        except Exception:
+            exception(self.log, "Failed to inject previous summary", phone=str(self._phone))
+        finally:
+            self._summary_injected = True
 
     def _ensure_greeting_playback(self):
         if self._greeting_requested or self._greeting_done:

@@ -16,6 +16,7 @@ from utils.logging import bind, exception, get_logger
 from integrations.amocrm import AmoCRMClient, AmoCRMError
 from integrations.deepgram import DeepgramClient
 from integrations.openai_structured import GPTStructuredExtractor
+from processing.conversation_memory import save_summary
 
 
 class CallProcessingPipeline:
@@ -125,6 +126,7 @@ class CallProcessingPipeline:
             )
 
             structured = self._extractor.extract_fields(transcript_text, utterances)
+            self._store_conversation_summary(phone, structured, call_id, log)
             custom_fields = self._convert_to_custom_fields(structured)
             if not custom_fields:
                 log.warning("Structured output produced no fields; skipping CRM update")
@@ -217,6 +219,18 @@ class CallProcessingPipeline:
                 prompt_context=prompt_context,
             )
             raise
+
+    def _store_conversation_summary(self, phone: str, structured: Optional[dict], call_id: Optional[str], log) -> None:
+        if not structured or not isinstance(structured, dict):
+            return
+        summary = structured.get("conversation_summary")
+        if not isinstance(summary, dict):
+            return
+        try:
+            save_summary(phone, summary, call_id=call_id)
+            log.debug("Conversation summary saved")
+        except Exception:
+            exception(log, "Failed to save conversation summary")
 
     def _write_audit_entry(
         self,
