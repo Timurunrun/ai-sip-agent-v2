@@ -61,21 +61,13 @@ class RealtimeClient:
             except Exception:
                 return
             t = data.get("type")
-            # Collect audio delta variants (accept both 'audio' and 'delta' keys)
-            if t in ("response.output_audio.delta", "response.audio.delta"):
-                b64 = data.get("audio") or data.get("delta") or ""
+            # Collect audio deltas
+            if t == "response.output_audio.delta":
+                b64 = data.get("delta") or ""
                 if b64:
                     chunk = base64.b64decode(b64)
                     if chunk:
-                        # Emit immediately for streaming playback
                         self.on_audio(chunk, self._current_sr)
-                # Sample rate may be provided as 'rate' or 'sample_rate'
-                sr = data.get("rate") or data.get("sample_rate")
-                if sr:
-                    try:
-                        self._current_sr = int(sr)
-                    except Exception:
-                        pass
                 # Track assistant message item id if present and signal start once
                 item_id = data.get("item_id")
                 if item_id and item_id != self._current_assistant_item_id:
@@ -84,10 +76,10 @@ class RealtimeClient:
                         self.on_assistant_stream_start(item_id)
                     except Exception:
                         pass
-            elif t in ("response.completed", "response.output_audio.done", "response.done"):
+            elif t in ("response.output_audio.done", "response.done"):
                 # Signal that current response audio finished
                 self.on_audio_done()
-            elif t in ("response.output_text.delta", "response.text.delta"):
+            elif t == "response.text.delta":
                 self.on_text(data.get("delta", ""))
             elif t == "input_audio_buffer.speech_started":
                 # Server VAD detected speech — client should interrupt playback and truncate server-side audio
@@ -158,7 +150,7 @@ class RealtimeClient:
             },
         }
             
-        # Load system prompt (instructions) from external Markdown file
+        # Load system prompt from external Markdown file
         try:
             base_dir = os.path.dirname(__file__)
             instructions_path = os.path.join(base_dir, "system_prompt.md")
