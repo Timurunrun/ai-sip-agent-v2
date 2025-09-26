@@ -130,7 +130,6 @@ class RealtimeClient:
         return self._current_assistant_item_id
 
     def update_session(self):
-        prompt_id = os.environ.get("REALTIME_PROMPT_ID")
         vad_eagerness = os.getenv("REALTIME_VAD_EAGERNESS", "high")
         voice = os.getenv("REALTIME_VOICE", "cedar")
 
@@ -158,8 +157,6 @@ class RealtimeClient:
                 },
             },
         }
-        if prompt_id:
-            event["session"]["prompt"] = {"id": prompt_id}
             
         # Load system prompt (instructions) from external Markdown file
         try:
