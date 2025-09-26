@@ -11,6 +11,8 @@ from audio.tail_wav import TailWavReader
 from realtime.session import RealtimeClient
 from utils.logging import get_logger, bind, exception
 
+GREETING_WAV = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "audio_samples", "Hey.wav"))
+
 
 class Call(pj.Call):
     """Per-call handler that bridges audio to gpt-realtime."""
@@ -28,6 +30,9 @@ class Call(pj.Call):
         self._rt: Optional[RealtimeClient] = None
         self._playing = False
         self._bot_streamer: Optional["BotAudioStreamer"] = None
+        self._greeting_player: Optional[pj.AudioMediaPlayer] = None
+        self._greeting_requested = False
+        self._greeting_done = False
         try:
             ci = self.getInfo()
             cid = getattr(ci, "callIdString", None)
@@ -115,6 +120,7 @@ class Call(pj.Call):
     def _stream_loop(self):
         try:
             self._rt.connect()
+            self._ensure_greeting_playback()
             self._rt.update_session()                                               # Configure session with audio in/out
             self._tail = TailWavReader(self._recording_path, wait_for_header=True)  # Create tail reader after header exists
             
@@ -139,6 +145,78 @@ class Call(pj.Call):
                 pass
             finally:
                 self._tail = None
+
+    def _ensure_greeting_playback(self):
+        if self._greeting_requested or self._greeting_done:
+            return
+        if not os.path.isfile(GREETING_WAV):
+            self._greeting_done = True
+            self.log.warning("Greeting file missing", path=str(GREETING_WAV))
+            return
+        self._greeting_requested = True
+        self._attempt_greeting_playback()
+
+    def _attempt_greeting_playback(self, retries: int = 200):
+        def _start(retries_left=retries):
+            if self._greeting_done or self._greeting_player:
+                return
+            if not self._is_call_active() or not self._has_valid_port(self._audio_media):
+                if retries_left > 0 and not self._stop_stream.is_set():
+                    def _retry():
+                        self._attempt_greeting_playback(retries_left - 1)
+                    timer = threading.Timer(0.05, _retry)
+                    timer.daemon = True
+                    timer.start()
+                else:
+                    self._greeting_done = True
+                    self.log.warning("Greeting playback skipped; media not ready")
+                return
+            try:
+                player = None
+                player = self._create_greeting_player(GREETING_WAV)
+                if self._has_valid_port(self._audio_media):
+                    player.startTransmit(self._audio_media)
+                self._greeting_player = player
+                self.log.info("Greeting playback started", file=str(GREETING_WAV))
+            except Exception:
+                exception(self.log, "Greeting playback failed", file=str(GREETING_WAV))
+                if player:
+                    try:
+                        player.delete()
+                    except Exception:
+                        pass
+                self._greeting_done = True
+        self.acc.cmdq.put(_start)
+
+    def _create_greeting_player(self, path: str) -> pj.AudioMediaPlayer:
+        call = self
+
+        class _GreetingPlayer(pj.AudioMediaPlayer):
+            def __init__(self_inner):
+                super().__init__()
+                self_inner._greeting_path = path
+
+            def onEof2(self_inner):
+                def _cleanup():
+                    am = call._audio_media
+                    try:
+                        if call._has_valid_port(self_inner) and call._has_valid_port(am):
+                            try:
+                                self_inner.stopTransmit(am)
+                            except Exception:
+                                pass
+                    finally:
+                        try:
+                            self_inner.delete()
+                        except Exception:
+                            pass
+                        call._greeting_player = None
+                        call._greeting_done = True
+                call.acc.cmdq.put(_cleanup)
+
+        p = _GreetingPlayer()
+        p.createPlayer(path, pj.PJMEDIA_FILE_NO_LOOP)
+        return p
 
     def _on_bot_text(self, text: str):
         self.log.debug("Bot text", text=text)
@@ -218,6 +296,22 @@ class Call(pj.Call):
         def _do():
             # At call teardown, the conference bridge may already be destroyed.
             # Avoid any stopTransmit/connect calls here to prevent pjmedia_conf assertions.
+            gp = self._greeting_player
+            am = self._audio_media
+            self._greeting_player = None
+            if gp:
+                try:
+                    if self._has_valid_port(gp) and self._has_valid_port(am):
+                        try:
+                            gp.stopTransmit(am)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        gp.delete()
+                    except Exception:
+                        pass
+            self._greeting_done = True
             self._player = None
             self._recorder = None
             self._audio_media = None
